@@ -1,0 +1,6 @@
+{
+  "name": "WhatsApp OrderDesk",
+  "description": "Multi-tenant SaaS for AI-powered WhatsApp order automation, inventory checking, customer CRM, and human handoff powered by Groq.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
