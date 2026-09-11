@@ -38,17 +38,21 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Meta Webhook Verification (GET)
-app.get('/api/webhooks/whatsapp', (req, res) => {
+// Meta Webhook Verification (GET) - Supports both /api/whatsapp/webhook and /api/webhooks/whatsapp
+const webhookPaths = ['/api/whatsapp/webhook', '/api/webhooks/whatsapp'];
+
+app.get(webhookPaths, (req, res) => {
   const mode = req.query['hub.mode'] as string;
   const token = req.query['hub.verify_token'] as string;
   const challenge = req.query['hub.challenge'] as string;
 
-  console.log(`[Meta Webhook GET Verify]: mode=${mode}`);
+  console.log(`[Meta Webhook GET Verify]: path=${req.path} mode=${mode} token=${token}`);
 
   const verification = metaWhatsAppService.verifyWebhook(mode, token, challenge);
   if (verification.isValid && verification.challenge) {
-    console.log('[Meta Webhook GET Verify]: Verified successfully!');
+    console.log('[Meta Webhook GET Verify]: Verified successfully! Returning challenge.');
+    // Meta requires the raw challenge string in plain text (Content-Type: text/plain or string body)
+    res.setHeader('Content-Type', 'text/plain');
     return res.status(200).send(verification.challenge);
   }
 
@@ -57,7 +61,7 @@ app.get('/api/webhooks/whatsapp', (req, res) => {
 });
 
 // Meta Webhook Message Receiver (POST)
-app.post('/api/webhooks/whatsapp', async (req, res) => {
+app.post(webhookPaths, async (req, res) => {
   try {
     // Return 200 immediately to Meta so the webhook never times out
     res.status(200).json({ status: 'EVENT_RECEIVED' });
