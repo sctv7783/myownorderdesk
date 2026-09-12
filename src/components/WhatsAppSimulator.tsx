@@ -17,6 +17,7 @@ import { Tenant } from '../types';
 
 interface WhatsAppSimulatorProps {
   tenant: Tenant;
+  greeting?: string;
   onRefreshData: () => void;
 }
 
@@ -27,7 +28,7 @@ interface SimMessage {
   timestamp: string;
 }
 
-export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, onRefreshData }) => {
+export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, greeting, onRefreshData }) => {
   const [customerPhone, setCustomerPhone] = useState('+92 333 7788990');
   const [customerName, setCustomerName] = useState('Kamran Tariq');
   const [inputMessage, setInputMessage] = useState('');
@@ -76,17 +77,29 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, on
         body: JSON.stringify({
           message: text,
           customerPhone,
-          customerName
+          customerName,
+          businessName: tenant.name,
+          greeting
         })
       });
 
-      const data = await res.json();
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(raw.slice(0, 120) || 'Invalid AI response');
+      }
       setLastApiLog(data);
+
+      if (!res.ok) {
+        throw new Error(data.error || `AI HTTP ${res.status}`);
+      }
 
       const aiReply: SimMessage = {
         id: `msg_a_${Date.now()}`,
         sender: 'AI',
-        text: data.aiResponse || 'Aapka order desk update ho gaya hai.',
+        text: data.aiResponse || data.error || 'Aapka order desk update ho gaya hai.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
 
@@ -96,7 +109,9 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, on
       const errMsg: SimMessage = {
         id: `msg_err_${Date.now()}`,
         sender: 'AI',
-        text: 'Error connecting to AI service. Please try again.',
+        text: err?.message
+          ? `AI error: ${String(err.message).slice(0, 180)}`
+          : 'Error connecting to AI service. Please try again.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
       setMessages(prev => [...prev, errMsg]);

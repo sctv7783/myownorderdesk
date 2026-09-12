@@ -7,6 +7,12 @@
 /api/whatsapp/connect-manual  /.netlify/functions/whatsapp-config  200!
 /api/whatsapp/send-test  /.netlify/functions/whatsapp-send-test  200!
 /api/products/import-from-url  /.netlify/functions/products-import  200!
+/api/ai/simulate  /.netlify/functions/ai-simulate  200!
+/api/ai/settings  /.netlify/functions/ai-settings  200!
+/api/ai/knowledge  /.netlify/functions/ai-settings  200!
+/api/ai/knowledge/*  /.netlify/functions/ai-settings  200!
+/api/conversations  /.netlify/functions/inbox  200!
+/api/conversations/*  /.netlify/functions/inbox  200!
 /api/tenants/*  /.netlify/functions/store-profile  200!
 /api/*  https://ais-dev-cifyabu6k35oatpotjurrn-390483467461.asia-southeast1.run.app/api/:splat  200!
 /*      /index.html                                                                        200

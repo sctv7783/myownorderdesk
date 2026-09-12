@@ -10,6 +10,9 @@
   node_bundler = "esbuild"
   included_files = ["netlify/lib/**"]
 
+[functions."ai-simulate"]
+  timeout = 26
+
 [functions."whatsapp-webhook"]
   timeout = 26
 
@@ -63,6 +66,42 @@
 [[redirects]]
   from = "/api/whatsapp/send-test"
   to = "/.netlify/functions/whatsapp-send-test"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/ai/simulate"
+  to = "/.netlify/functions/ai-simulate"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/ai/settings"
+  to = "/.netlify/functions/ai-settings"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/ai/knowledge"
+  to = "/.netlify/functions/ai-settings"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/ai/knowledge/*"
+  to = "/.netlify/functions/ai-settings"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/conversations"
+  to = "/.netlify/functions/inbox"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/conversations/*"
+  to = "/.netlify/functions/inbox"
   status = 200
   force = true
 

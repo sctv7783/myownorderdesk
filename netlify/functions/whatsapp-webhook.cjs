@@ -9,9 +9,10 @@ const VERIFY_TOKENS = new Set(
     .map((t) => String(t).trim())
 );
 
-const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
 const { loadConfig, loadConfigByPhone } = require('../lib/whatsapp-store.cjs');
 const { markMessageAsRead, sendWhatsAppText } = require('../lib/meta-graph.cjs');
+const { generateAgentReply } = require('../lib/groq-agent.cjs');
+const { appendMessage } = require('../lib/inbox-store.cjs');
 
 function firstValue(value) {
   if (Array.isArray(value)) return value[0];
@@ -83,55 +84,6 @@ async function resolveCreds(phoneNumberId) {
   return await loadConfig(process.env.DEFAULT_TENANT_ID || 'tenant_khyber_001');
 }
 
-async function generateAgentReply(incomingText, creds) {
-  const businessName = creds?.verifiedName || creds?.businessName || 'our store';
-  const greeting =
-    creds?.agentGreeting ||
-    `Assalam o Alaikum! ${businessName} mein khush amdeed. Main aapka order assistant hoon.`;
-  const apiKey = process.env.GROQ_API_KEY;
-
-  if (!incomingText) {
-    return 'Photo/media receive ho gayi. Barah-e-karam product ka naam ya order detail text mein likhein.';
-  }
-
-  if (!apiKey) {
-    return `${greeting}\n\nAapka message: "${incomingText.slice(0, 80)}"\nHum yeh dekh rahe hain. Order ke liye product naam, quantity aur address bhejein.`;
-  }
-
-  try {
-    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        temperature: 0.3,
-        max_tokens: 400,
-        messages: [
-          {
-            role: 'system',
-            content: `You are the WhatsApp ordering agent for "${businessName}".
-Reply in the customer's language (Urdu, Roman Urdu, or English). Keep replies short (2-6 sentences).
-Help with products, prices, delivery, and taking orders. Ask for quantity and delivery address before confirming.
-Do not invent prices. If catalog is unknown, ask what they want to order.
-Optional greeting style: ${greeting}`
-          },
-          { role: 'user', content: incomingText }
-        ]
-      })
-    });
-    const groqData = await groqRes.json().catch(() => ({}));
-    const reply = groqData.choices?.[0]?.message?.content?.trim();
-    if (reply) return reply;
-  } catch (err) {
-    console.error('[Webhook Groq]', err);
-  }
-
-  return `${greeting}\nAapka message receive ho gaya. Order confirm karne ke liye product naam aur address bhejein.`;
-}
-
 async function handleIncoming(payload) {
   if (!payload || !Array.isArray(payload.entry)) {
     if (payload && payload.object && payload.object !== 'whatsapp_business_account') return;
@@ -148,30 +100,63 @@ async function handleIncoming(payload) {
       const creds = await resolveCreds(phoneNumberId);
       const token = creds?.accessToken;
       const phoneId = creds?.phoneNumberId || phoneNumberId;
+      const tenantId = creds?.tenantId || process.env.DEFAULT_TENANT_ID || 'tenant_khyber_001';
       if (!token || !phoneId) {
         console.warn('[Webhook] No Meta token for phone', phoneNumberId);
         continue;
       }
 
       for (const msg of messages) {
+        const senderPhone = msg.from ? `+${String(msg.from).replace(/\D/g, '')}` : '';
+        const contactName =
+          val.contacts?.find((c) => c.wa_id === msg.from)?.profile?.name ||
+          `Customer ${senderPhone.slice(-4)}`;
+        const incomingText =
+          msg.text?.body ||
+          msg.button?.text ||
+          msg.interactive?.button_reply?.title ||
+          (msg.type && msg.type !== 'text' ? `[${msg.type}]` : '');
+
         await markMessageAsRead({
           phoneNumberId: phoneId,
           accessToken: token,
           messageId: msg.id
         });
 
-        const incomingText =
-          msg.text?.body ||
-          msg.button?.text ||
-          msg.interactive?.button_reply?.title ||
-          '';
+        const savedIn = await appendMessage(tenantId, {
+          customerPhone: senderPhone,
+          customerName: contactName,
+          phoneNumberId: phoneId,
+          sender: 'CUSTOMER',
+          text: incomingText,
+          whatsappMessageId: msg.id
+        });
 
-        const reply = await generateAgentReply(incomingText, creds);
+        const result = await generateAgentReply(incomingText, {
+          tenantId,
+          customerName: contactName,
+          customerPhone: senderPhone,
+          businessName: creds?.verifiedName || creds?.businessName,
+          conversationId: savedIn?.conversation?.id
+        });
+
+        if (result.skipped || !result.reply) {
+          continue;
+        }
+
         await sendWhatsAppText({
           phoneNumberId: phoneId,
           accessToken: token,
           to: msg.from,
-          text: reply
+          text: result.reply
+        });
+
+        await appendMessage(tenantId, {
+          customerPhone: senderPhone,
+          customerName: contactName,
+          phoneNumberId: phoneId,
+          sender: 'AI',
+          text: result.reply
         });
       }
     }

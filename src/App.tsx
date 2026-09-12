@@ -36,7 +36,27 @@ import {
   localConfigToAccount
 } from './whatsappLocalConfig';
 
-function storeProfileKey(tenantId: string) {
+function defaultAgentSettings(tenantId: string): AgentSettings {
+  return {
+    id: `ai_settings_${tenantId}`,
+    tenantId,
+    isEnabled: true,
+    model: 'openai/gpt-oss-20b',
+    primaryLanguage: 'auto',
+    tone: 'friendly',
+    greetingMessage:
+      'Assalam-o-Alaikum! Welcome to our official WhatsApp store. Main aapki kya madad kar sakta hoon?',
+    customInstructions:
+      'Be polite, friendly, and always confirm delivery address and item counts before finalizing any order.',
+    orderConfirmationRequired: true,
+    handoffKeywords: ['human', 'agent', 'staff', 'complaint', 'manager', 'madad'],
+    enableStockCheck: true,
+    autoHandoffOnComplaint: true,
+    workingHoursOnly: false,
+    maxToolLoops: 5,
+    updatedAt: new Date().toISOString()
+  };
+}
   return `orderdesk_store_profile_${tenantId}`;
 }
 
@@ -163,8 +183,10 @@ export default function App() {
       const safeFetch = async (url: string) => {
         try {
           const res = await fetch(url, { headers });
+          const raw = await res.text();
           if (!res.ok) return null;
-          return await res.json();
+          if (!raw || raw.trimStart().startsWith('<')) return null;
+          return JSON.parse(raw);
         } catch (e) {
           console.warn(`Fetch error for ${url}:`, e);
           return null;
@@ -207,7 +229,7 @@ export default function App() {
       setProducts(loadedProducts);
       setCustomers(loadedCustomers);
       setNotifications(loadedNotifs);
-      setAgentSettings(aiRes?.settings || null);
+      setAgentSettings(aiRes?.settings || defaultAgentSettings(tenantId));
       setKnowledgeItems(aiRes?.knowledgeItems || aiRes?.knowledge || []);
       if (waRes?.account) {
         setWhatsappAccount(waRes.account);
@@ -229,12 +251,13 @@ export default function App() {
 
       // Auto-select first conversation if available
       if (loadedConvs.length > 0) {
-        setSelectedConvId(prev => prev && loadedConvs.some((c: any) => c.id === prev) ? prev : loadedConvs[0].id);
-      } else {
-        setSelectedConvId(null);
+        setSelectedConvId(prev =>
+          prev && loadedConvs.some((c: any) => c.id === prev) ? prev : loadedConvs[0].id
+        );
       }
     } catch (err) {
       console.error('Error fetching tenant data:', err);
+      if (tenantId) setAgentSettings(prev => prev || defaultAgentSettings(tenantId));
     }
   }, []);
 
@@ -244,25 +267,75 @@ export default function App() {
     }
   }, [currentTenant, loadTenantData]);
 
-  // Load messages whenever selected conversation changes
+  useEffect(() => {
+    if (!currentTenant) return;
+    let cancelled = false;
+
+    const pollInbox = async () => {
+      try {
+        const res = await fetch('/api/conversations', {
+          headers: { 'x-tenant-id': currentTenant.id }
+        });
+        const raw = await res.text();
+        let data: any = null;
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          return;
+        }
+        const list = Array.isArray(data) ? data : data?.conversations || [];
+        if (cancelled || !Array.isArray(list)) return;
+        setConversations(prev => {
+          const prevStamp = prev[0]?.lastMessageAt || '';
+          const nextStamp = list[0]?.lastMessageAt || '';
+          if (prev.length === list.length && prevStamp === nextStamp) return prev;
+          return list;
+        });
+        setSelectedConvId(prev => {
+          if (prev && list.some((c: any) => c.id === prev)) return prev;
+          return list[0]?.id || prev;
+        });
+      } catch {
+        /* ignore poll errors */
+      }
+    };
+
+    pollInbox();
+    const timer = window.setInterval(pollInbox, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [currentTenant?.id]);
+
+  // Load messages whenever selected conversation changes, then poll for new ones
   useEffect(() => {
     if (!currentTenant || !selectedConvId) {
       setMessages([]);
       return;
     }
 
+    let cancelled = false;
+
     async function loadMessages() {
       try {
         const res = await fetch(`/api/conversations/${selectedConvId}/messages`, {
           headers: { 'x-tenant-id': currentTenant!.id }
         });
-        const data = await res.json();
-        setMessages(data.messages || []);
+        const raw = await res.text();
+        if (raw.trimStart().startsWith('<')) return;
+        const data = JSON.parse(raw);
+        if (!cancelled) setMessages(data.messages || []);
       } catch (err) {
         console.error('Error loading messages:', err);
       }
     }
     loadMessages();
+    const timer = window.setInterval(loadMessages, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [currentTenant, selectedConvId]);
 
   // Handle staff reply in WhatsApp inbox
@@ -813,6 +886,7 @@ export default function App() {
           {currentView === 'simulator' && (
             <WhatsAppSimulator
               tenant={currentTenant}
+              greeting={agentSettings?.greetingMessage}
               onRefreshData={() => loadTenantData(currentTenant.id)}
             />
           )}
@@ -850,10 +924,10 @@ export default function App() {
             />
           )}
 
-          {currentView === 'ai-settings' && agentSettings && (
+          {currentView === 'ai-settings' && (
             <AiSettingsView
               tenant={currentTenant}
-              settings={agentSettings}
+              settings={agentSettings || defaultAgentSettings(currentTenant.id)}
               knowledgeItems={knowledgeItems}
               onSaveSettings={handleSaveAiSettings}
               onAddKnowledge={handleAddKnowledge}
