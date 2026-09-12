@@ -480,6 +480,92 @@ export async function persistProductToSupabase(prod: Product): Promise<void> {
   }
 }
 
+export async function persistWhatsAppConnectionToSupabase(data: {
+  tenantId: string;
+  wabaId: string;
+  phoneNumberId: string;
+  displayPhoneNumber: string;
+  verifiedName: string;
+  accessToken: string;
+}): Promise<boolean> {
+  const client = getSupabaseServerClient();
+  if (!client) return false;
+
+  const now = new Date().toISOString();
+
+  try {
+    const { error: cfgError } = await client.from('whatsapp_configs').upsert(
+      {
+        business_id: data.tenantId,
+        waba_id: data.wabaId,
+        phone_number_id: data.phoneNumberId,
+        display_phone_number: data.displayPhoneNumber,
+        verified_name: data.verifiedName,
+        access_token: data.accessToken,
+        updated_at: now
+      },
+      { onConflict: 'business_id' }
+    );
+    if (!cfgError) return true;
+    console.warn('[Supabase WhatsApp Config]:', cfgError.message);
+  } catch (e: any) {
+    console.warn('[Supabase WhatsApp Config Exception]:', e?.message || e);
+  }
+
+  if (!isUuid(data.tenantId)) return false;
+
+  try {
+    const accountPayload = {
+      tenant_id: data.tenantId,
+      waba_id: data.wabaId,
+      business_name: data.verifiedName,
+      status: 'CONNECTED',
+      access_token_encrypted: data.accessToken,
+      last_verified_at: now,
+      updated_at: now
+    };
+    const { data: existing } = await client
+      .from('whatsapp_accounts')
+      .select('id')
+      .eq('tenant_id', data.tenantId)
+      .maybeSingle();
+
+    let accountId = existing?.id as string | undefined;
+    if (accountId) {
+      await client.from('whatsapp_accounts').update(accountPayload).eq('id', accountId);
+    } else {
+      const { data: inserted, error } = await client
+        .from('whatsapp_accounts')
+        .insert(accountPayload)
+        .select('id')
+        .single();
+      if (error) {
+        console.warn('[Supabase WhatsApp Account]:', error.message);
+        return false;
+      }
+      accountId = inserted.id;
+    }
+
+    await client.from('whatsapp_phone_numbers').upsert(
+      {
+        tenant_id: data.tenantId,
+        whatsapp_account_id: accountId,
+        phone_number_id: data.phoneNumberId,
+        display_phone_number: data.displayPhoneNumber,
+        verified_name: data.verifiedName,
+        status: 'CONNECTED',
+        is_primary: true,
+        updated_at: now
+      },
+      { onConflict: 'phone_number_id' }
+    );
+    return true;
+  } catch (e: any) {
+    console.warn('[Supabase WhatsApp Account Exception]:', e?.message || e);
+    return false;
+  }
+}
+
 export async function persistMessageToSupabase(msg: ConversationMessage, tenantId: string): Promise<void> {
   const client = getSupabaseServerClient();
   if (!client || !isUuid(tenantId) || !isUuid(msg.conversationId)) return;

@@ -5,6 +5,61 @@
 [build.environment]
   SECRETS_SCAN_ENABLED = "false"
 
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  included_files = ["netlify/lib/**"]
+
+# Meta webhook must be served by a Netlify function (plain-text challenge).
+# This must stay above the /api/* Cloud Run proxy, or Facebook gets the SPA HTML.
+[[redirects]]
+  from = "/api/whatsapp/webhook"
+  to = "/.netlify/functions/whatsapp-webhook"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/whatsapp/webhook/"
+  to = "/.netlify/functions/whatsapp-webhook"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/webhooks/whatsapp"
+  to = "/.netlify/functions/whatsapp-webhook"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/webhooks/whatsapp/"
+  to = "/.netlify/functions/whatsapp-webhook"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/whatsapp/config"
+  to = "/.netlify/functions/whatsapp-config"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/whatsapp/status"
+  to = "/.netlify/functions/whatsapp-config"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/whatsapp/connect-manual"
+  to = "/.netlify/functions/whatsapp-config"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/whatsapp/send-test"
+  to = "/.netlify/functions/whatsapp-send-test"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "/api/*"
   to = "https://ais-dev-cifyabu6k35oatpotjurrn-390483467461.asia-southeast1.run.app/api/:splat"

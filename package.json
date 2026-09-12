@@ -13,6 +13,7 @@
     "test": "tsx src/test/run-tests.ts"
   },
   "dependencies": {
+    "@netlify/blobs": "^10.0.10",
     "@google/genai": "^2.4.0",
     "@supabase/supabase-js": "^2.116.0",
     "@tailwindcss/vite": "^4.1.14",

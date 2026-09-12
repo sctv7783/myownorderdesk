@@ -30,6 +30,11 @@ import { WhatsAppSettingsView } from './components/WhatsAppSettingsView';
 import { TeamView } from './components/TeamView';
 import { BillingView } from './components/BillingView';
 import { OnboardingModal } from './components/OnboardingModal';
+import {
+  loadLocalWhatsAppConfig,
+  saveLocalWhatsAppConfig,
+  localConfigToAccount
+} from './whatsappLocalConfig';
 
 export default function App() {
   // Navigation & Tenant state
@@ -183,8 +188,20 @@ export default function App() {
       setNotifications(loadedNotifs);
       setAgentSettings(aiRes?.settings || null);
       setKnowledgeItems(aiRes?.knowledgeItems || aiRes?.knowledge || []);
-      setWhatsappAccount(waRes?.account);
-      setPhoneNumbers(waRes?.phoneNumbers || []);
+      if (waRes?.account) {
+        setWhatsappAccount(waRes.account);
+        setPhoneNumbers(waRes.phoneNumbers || []);
+      } else {
+        const local = loadLocalWhatsAppConfig(tenantId);
+        if (local) {
+          const mapped = localConfigToAccount(tenantId, local);
+          setWhatsappAccount(mapped.account);
+          setPhoneNumbers(mapped.phoneNumbers);
+        } else {
+          setWhatsappAccount(undefined);
+          setPhoneNumbers([]);
+        }
+      }
       setMembers(loadedMembers);
       setSubscription(subRes?.subscription);
       if (analyticsRes?.analytics || analyticsRes) setAnalytics(analyticsRes?.analytics || analyticsRes);
@@ -493,14 +510,13 @@ export default function App() {
     }
   };
 
-  // Handle Save Manual WhatsApp Config
   const handleSaveManualConfig = async (data: {
     wabaId: string;
     phoneNumberId: string;
     accessToken: string;
     displayNumber: string;
-  }) => {
-    if (!currentTenant) return;
+  }): Promise<{ success: boolean; error?: string }> => {
+    if (!currentTenant) return { success: false, error: 'No tenant selected.' };
     try {
       const res = await fetch('/api/whatsapp/config', {
         method: 'POST',
@@ -510,11 +526,27 @@ export default function App() {
         },
         body: JSON.stringify(data)
       });
-      const resData = await res.json();
+      const contentType = res.headers.get('content-type') || '';
+      const resData = contentType.includes('application/json') ? await res.json() : null;
+      if (!res.ok || !resData?.success) {
+        return {
+          success: false,
+          error: resData?.error || `Save failed (HTTP ${res.status}). Deploy the latest Netlify functions, then try again.`
+        };
+      }
       if (resData.account) setWhatsappAccount(resData.account);
       if (resData.phoneNumbers) setPhoneNumbers(resData.phoneNumbers);
+      saveLocalWhatsAppConfig(currentTenant.id, {
+        wabaId: data.wabaId,
+        phoneNumberId: data.phoneNumberId,
+        accessToken: data.accessToken,
+        displayNumber: data.displayNumber,
+        verifiedName: resData.primaryPhone?.verifiedName || resData.account?.businessName
+      });
+      return { success: true };
     } catch (err) {
       console.error('Error saving WhatsApp configuration:', err);
+      return { success: false, error: 'Network error while saving Meta credentials.' };
     }
   };
 
@@ -522,14 +554,22 @@ export default function App() {
   const handleSendTestMessage = async (phoneNumber: string, text: string): Promise<boolean> => {
     if (!currentTenant) return false;
     try {
+      const local = loadLocalWhatsAppConfig(currentTenant.id);
       const res = await fetch('/api/whatsapp/send-test', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-tenant-id': currentTenant.id
         },
-        body: JSON.stringify({ phoneNumber, text })
+        body: JSON.stringify({
+          phoneNumber,
+          text,
+          accessToken: local?.accessToken,
+          phoneNumberId: local?.phoneNumberId
+        })
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) return false;
       const data = await res.json();
       return data.success === true;
     } catch {

@@ -1,7 +1,7 @@
 # WhatsApp OrderDesk — Database Architecture & Schema
 
 ## Overview
-WhatsApp OrderDesk utilizes a **multi-tenant PostgreSQL database**. Every data record created by or on behalf of a tenant contains a `tenant_id` foreign key referencing the `tenants` table.
+WhatsApp OrderDesk uses a **PostgreSQL** database. The live app stores tenancy as `business_id` on the `businesses` table (not `tenant_id`). Always run `supabase_queries.sql` — it is safe on existing projects and will not error if `tenant_id` is missing.
 
 Strict Row Level Security (RLS) policies and security-definer helper functions guarantee that users and AI operations never access cross-tenant data.
 

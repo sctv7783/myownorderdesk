@@ -87,11 +87,12 @@ export const AiSettingsView: React.FC<AiSettingsViewProps> = ({
           <div className="flex items-center space-x-2">
             <h1 className="text-2xl font-bold text-white tracking-tight">Groq AI Agent Configuration</h1>
             <span className="bg-emerald-500/10 text-emerald-400 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-emerald-500/20">
-              Active
+              Groq API
             </span>
           </div>
           <p className="text-sm text-slate-400 mt-1">
-            Customize conversation persona, language preferences, tool-calling guards, and store knowledge base.
+            AI replies <span className="font-mono text-emerald-400">GROQ_API_KEY</span> se chalti hain, model{' '}
+            <span className="text-emerald-400 font-mono">openai/gpt-oss-20b</span>. Meta token sirf WhatsApp send/receive ke liye hai.
           </p>
         </div>
 
@@ -129,7 +130,7 @@ export const AiSettingsView: React.FC<AiSettingsViewProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1">
-                Optimized for ultra-fast latency tool calling and multi-turn Urdu / Roman Urdu order dialogs.
+                Powered by Groq API key env <span className="font-mono text-emerald-400">GROQ_API_KEY</span>. Meta WhatsApp token is not used for AI.
               </p>
             </div>
 

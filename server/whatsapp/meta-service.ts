@@ -72,16 +72,56 @@ export class MetaWhatsAppService {
 
   // Verify Webhook GET subscription
   verifyWebhook(mode: string | undefined, token: string | undefined, challenge: string | undefined): { isValid: boolean; challenge?: string } {
-    const expectedToken = process.env.META_VERIFY_TOKEN || 'orderdesk_webhook_verify_token_secure';
+    const expectedToken = (process.env.META_VERIFY_TOKEN || 'orderdesk_webhook_verify_token_secure').trim();
+    const incomingToken = (token || '').trim();
+    const incomingMode = (mode || '').trim();
     if (
-      mode === 'subscribe' &&
-      (token === expectedToken ||
-        token === 'orderdesk_webhook_verify_token_secure' ||
-        token === 'my_whatsapp_verify_token_123')
+      incomingMode === 'subscribe' &&
+      incomingToken.length > 0 &&
+      challenge != null &&
+      String(challenge).length > 0 &&
+      (incomingToken === expectedToken ||
+        incomingToken === 'orderdesk_webhook_verify_token_secure' ||
+        incomingToken === 'my_whatsapp_verify_token_123')
     ) {
-      return { isValid: true, challenge };
+      return { isValid: true, challenge: String(challenge) };
     }
     return { isValid: false };
+  }
+
+  async verifyCredentials(
+    phoneNumberId: string,
+    accessToken: string
+  ): Promise<{
+    ok: boolean;
+    error?: string;
+    displayPhoneNumber?: string;
+    verifiedName?: string;
+    qualityRating?: string;
+  }> {
+    const token = (accessToken || '').trim();
+    const phoneId = (phoneNumberId || '').trim();
+    if (!phoneId) return { ok: false, error: 'Phone Number ID is required.' };
+    if (!token || token.includes('...') || token.includes('meta_system_user_token') || token === 'mock_token') {
+      return { ok: false, error: 'Paste a real Meta System User access token (starts with EAA).' };
+    }
+
+    try {
+      const url = `https://graph.facebook.com/${this.graphVersion}/${encodeURIComponent(phoneId)}?fields=id,display_phone_number,verified_name,quality_rating`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (!res.ok) {
+        return { ok: false, error: data.error?.message || 'Meta rejected this Phone Number ID or access token.' };
+      }
+      return {
+        ok: true,
+        displayPhoneNumber: data.display_phone_number,
+        verifiedName: data.verified_name,
+        qualityRating: data.quality_rating
+      };
+    } catch (err: any) {
+      return { ok: false, error: err.message || 'Could not reach Meta Graph API.' };
+    }
   }
 
   // Send an outgoing WhatsApp message through Meta Cloud API

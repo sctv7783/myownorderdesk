@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 import { db, generateId } from './server/db';
 import { metaWhatsAppService, resolveMetaAccessToken } from './server/whatsapp/meta-service';
 import { processCustomerMessageWithAi, MANDATORY_GROQ_MODEL } from './server/ai/groq';
-import { syncSupabaseWithStore, persistOrderStatusToSupabase } from './server/supabase';
+import { syncSupabaseWithStore, persistOrderStatusToSupabase, persistWhatsAppConnectionToSupabase } from './server/supabase';
 import { scrapeProductsFromUrl } from './server/services/scraper';
 
 dotenv.config();
@@ -42,22 +42,25 @@ app.get('/api/health', (req, res) => {
 const webhookPaths = ['/api/whatsapp/webhook', '/api/webhooks/whatsapp'];
 
 app.get(webhookPaths, (req, res) => {
-  const mode = req.query['hub.mode'] as string;
-  const token = req.query['hub.verify_token'] as string;
-  const challenge = req.query['hub.challenge'] as string;
+  const mode = (req.query['hub.mode'] || req.query.mode) as string;
+  const token = (req.query['hub.verify_token'] || req.query.verify_token) as string;
+  const challenge = (req.query['hub.challenge'] || req.query.challenge) as string;
 
-  console.log(`[Meta Webhook GET Verify]: path=${req.path} mode=${mode} token=${token}`);
+  console.log(`[Meta Webhook GET Verify]: path=${req.path} mode=${mode} token=${token ? '[present]' : '[missing]'}`);
 
   const verification = metaWhatsAppService.verifyWebhook(mode, token, challenge);
-  if (verification.isValid && verification.challenge) {
+  if (verification.isValid && verification.challenge != null) {
     console.log('[Meta Webhook GET Verify]: Verified successfully! Returning challenge.');
-    // Meta requires the raw challenge string in plain text (Content-Type: text/plain or string body)
-    res.setHeader('Content-Type', 'text/plain');
-    return res.status(200).send(verification.challenge);
+    res.status(200);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(String(verification.challenge));
   }
 
   console.warn('[Meta Webhook GET Verify]: Verification failed. Token mismatch.');
-  return res.status(403).json({ error: 'Webhook verification token mismatch' });
+  res.status(403);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  return res.send('Forbidden');
 });
 
 // Meta Webhook Message Receiver (POST)
@@ -172,8 +175,8 @@ const getWhatsAppStatusHandler = (req: express.Request, res: express.Response) =
     account,
     phoneNumbers,
     primaryPhone,
-    appUrl: process.env.APP_URL || 'https://what-sapp-orderdesk.netlify.app',
-    webhookUrl: `${process.env.APP_URL || 'https://what-sapp-orderdesk.netlify.app'}/api/webhooks/whatsapp`,
+    appUrl: process.env.APP_URL || 'https://whats-app-orderdesk.netlify.app',
+    webhookUrl: `${process.env.APP_URL || 'https://whats-app-orderdesk.netlify.app'}/api/whatsapp/webhook`,
     verifyToken: process.env.META_VERIFY_TOKEN || 'orderdesk_webhook_verify_token_secure',
     metaAppId: process.env.META_APP_ID || ''
   });
@@ -182,22 +185,47 @@ const getWhatsAppStatusHandler = (req: express.Request, res: express.Response) =
 app.get('/api/whatsapp/status', getWhatsAppStatusHandler);
 app.get('/api/whatsapp/config', getWhatsAppStatusHandler);
 
-app.post('/api/whatsapp/config', (req, res) => {
+app.post('/api/whatsapp/config', async (req, res) => {
   const tenantId = getTenantId(req);
   const { wabaId, phoneNumberId, accessToken, displayNumber, displayPhoneNumber, businessName, verifiedName } = req.body;
+
+  if (!wabaId || !phoneNumberId || !accessToken) {
+    return res.status(400).json({
+      success: false,
+      error: 'WABA ID, Phone Number ID, and Access Token are required.'
+    });
+  }
+
+  const verified = await metaWhatsAppService.verifyCredentials(phoneNumberId, accessToken);
+  if (!verified.ok) {
+    return res.status(400).json({ success: false, error: verified.error, connected: false });
+  }
+
   const conn = db.saveWhatsAppConnection(tenantId, {
-    wabaId: wabaId || 'waba_custom',
-    businessName: businessName || verifiedName || 'WhatsApp Business',
-    phoneNumberId: phoneNumberId || 'phone_id_custom',
-    displayPhoneNumber: displayNumber || displayPhoneNumber || '+92 300 0000000',
-    verifiedName: verifiedName || businessName || 'WhatsApp Business',
+    wabaId,
+    businessName: businessName || verified.verifiedName || verifiedName || 'WhatsApp Business',
+    phoneNumberId,
+    displayPhoneNumber: verified.displayPhoneNumber || displayNumber || displayPhoneNumber,
+    verifiedName: verified.verifiedName || verifiedName || businessName || 'WhatsApp Business',
     accessTokenEncrypted: accessToken
   });
+
+  await persistWhatsAppConnectionToSupabase({
+    tenantId,
+    wabaId,
+    phoneNumberId,
+    displayPhoneNumber: conn.phoneNumber.displayPhoneNumber,
+    verifiedName: conn.phoneNumber.verifiedName,
+    accessToken
+  });
+
   res.json({
     success: true,
+    connected: true,
     connection: conn,
     account: db.getWhatsAppAccount(tenantId),
-    phoneNumbers: db.getWhatsAppPhoneNumbers(tenantId)
+    phoneNumbers: db.getWhatsAppPhoneNumbers(tenantId),
+    message: 'Meta WhatsApp Cloud API connected and credentials saved.'
   });
 });
 
@@ -209,7 +237,7 @@ app.post('/api/whatsapp/send-test', async (req, res) => {
   const account = db.getWhatsAppAccount(tenantId);
   const token = account?.accessTokenEncrypted || process.env.META_ACCESS_TOKEN || 'mock_token';
   const result = await metaWhatsAppService.sendTextMessage(phoneId, token, phoneNumber || '+923001234567', text || 'Test message from WhatsApp OrderDesk');
-  res.json({ success: true, result });
+  res.status(result.success ? 200 : 400).json({ success: result.success, result, error: result.error });
 });
 
 app.post('/api/whatsapp/connect-embedded', async (req, res) => {
@@ -654,7 +682,8 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/')) return next();
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

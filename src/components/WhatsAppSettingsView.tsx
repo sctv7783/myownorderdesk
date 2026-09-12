@@ -18,7 +18,12 @@ interface WhatsAppSettingsViewProps {
   tenant: Tenant;
   account?: WhatsAppAccount;
   phoneNumbers: WhatsAppPhoneNumber[];
-  onSaveManualConfig: (data: { wabaId: string; phoneNumberId: string; accessToken: string; displayNumber: string }) => void;
+  onSaveManualConfig: (data: {
+    wabaId: string;
+    phoneNumberId: string;
+    accessToken: string;
+    displayNumber: string;
+  }) => Promise<{ success: boolean; error?: string }>;
   onSendTestMessage: (phoneNumber: string, text: string) => Promise<boolean>;
 }
 
@@ -35,12 +40,22 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
   const [testText, setTestText] = useState('OrderDesk Test: WhatsApp Cloud API connection is active!');
   const [testSending, setTestSending] = useState(false);
   const [testSuccess, setTestSuccess] = useState<boolean | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
-  // Manual configuration form state
+  const isConnected = Boolean(account?.wabaId && phoneNumbers[0]?.phoneNumberId && account.status === 'CONNECTED');
+
   const [manualWaba, setManualWaba] = useState(account?.wabaId || '');
   const [manualPhoneId, setManualPhoneId] = useState(phoneNumbers[0]?.phoneNumberId || '');
-  const [manualToken, setManualToken] = useState('EAABwz...meta_system_user_token');
-  const [manualDisplayNum, setManualDisplayNum] = useState(phoneNumbers[0]?.displayPhoneNumber || '+92 300 1234567');
+  const [manualToken, setManualToken] = useState('');
+  const [manualDisplayNum, setManualDisplayNum] = useState(phoneNumbers[0]?.displayPhoneNumber || '');
+
+  React.useEffect(() => {
+    setManualWaba(account?.wabaId || '');
+    setManualPhoneId(phoneNumbers[0]?.phoneNumberId || '');
+    setManualDisplayNum(phoneNumbers[0]?.displayPhoneNumber || '');
+  }, [account?.wabaId, phoneNumbers]);
 
   const webhookUrl = `${window.location.origin}/api/whatsapp/webhook`;
   const verifyToken = 'orderdesk_webhook_verify_token_secure';
@@ -67,15 +82,33 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
     }
   };
 
-  const handleSaveManual = (e: React.FormEvent) => {
+  const handleSaveManual = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSaveManualConfig({
-      wabaId: manualWaba,
-      phoneNumberId: manualPhoneId,
-      accessToken: manualToken,
-      displayNumber: manualDisplayNum
-    });
-    setIsManualModalOpen(false);
+    setSaveError(null);
+    setSaveSuccess(null);
+    if (manualToken.includes('...') || /meta_system_user_token/i.test(manualToken)) {
+      setSaveError('Placeholder token nahi chalega. Meta se real System User token paste karein (EAA se start hota hai).');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const result = await onSaveManualConfig({
+        wabaId: manualWaba.trim(),
+        phoneNumberId: manualPhoneId.trim(),
+        accessToken: manualToken.trim(),
+        displayNumber: manualDisplayNum.trim()
+      });
+      if (result.success) {
+        setSaveSuccess('Meta WhatsApp Cloud API connect ho gayi. Credentials save ho chuki hain.');
+        setIsManualModalOpen(false);
+      } else {
+        setSaveError(result.error || 'Credentials save nahi ho sakin. Token aur IDs check karein.');
+      }
+    } catch {
+      setSaveError('Network error: credentials save nahi ho sakin.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const primaryPhone = phoneNumbers[0];
@@ -115,11 +148,17 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
             <div>
               <div className="flex items-center space-x-2">
                 <h3 className="text-base font-bold text-white">
-                  {primaryPhone ? primaryPhone.displayPhoneNumber : 'No Phone Number Connected'}
+                  {isConnected ? primaryPhone!.displayPhoneNumber : 'No Phone Number Connected'}
                 </h3>
-                <span className="bg-emerald-500/20 text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-500/30 flex items-center">
-                  <CheckCircle2 className="w-3 h-3 mr-1" /> ACTIVE & VERIFIED
-                </span>
+                {isConnected ? (
+                  <span className="bg-emerald-500/20 text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-500/30 flex items-center">
+                    <CheckCircle2 className="w-3 h-3 mr-1" /> ACTIVE & VERIFIED
+                  </span>
+                ) : (
+                  <span className="bg-amber-500/20 text-amber-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-amber-500/30 flex items-center">
+                    <AlertCircle className="w-3 h-3 mr-1" /> NOT CONNECTED
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
                 Verified Name: <span className="text-slate-200 font-medium">{primaryPhone?.verifiedName || tenant.name}</span>
@@ -146,9 +185,9 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
               WhatsApp Business Account ID (WABA)
             </span>
             <div className="flex items-center justify-between text-slate-300">
-              <span className="truncate">{account?.wabaId || 'waba_khyber_1001'}</span>
+              <span className="truncate">{account?.wabaId || 'Not configured'}</span>
               <button
-                onClick={() => handleCopy(account?.wabaId || 'waba_khyber_1001', 'waba')}
+                onClick={() => handleCopy(account?.wabaId || '', 'waba')}
                 className="text-slate-400 hover:text-white ml-2"
               >
                 <Copy className="w-3.5 h-3.5" />
@@ -161,9 +200,9 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
               Phone Number ID (Webhook Resolver Key)
             </span>
             <div className="flex items-center justify-between text-slate-300">
-              <span className="truncate">{primaryPhone?.phoneNumberId || 'phone_id_khyber_1001'}</span>
+              <span className="truncate">{primaryPhone?.phoneNumberId || 'Not configured'}</span>
               <button
-                onClick={() => handleCopy(primaryPhone?.phoneNumberId || 'phone_id_khyber_1001', 'phoneId')}
+                onClick={() => handleCopy(primaryPhone?.phoneNumberId || '', 'phoneId')}
                 className="text-slate-400 hover:text-white ml-2"
               >
                 <Copy className="w-3.5 h-3.5" />
@@ -172,6 +211,19 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
           </div>
         </div>
       </div>
+
+      {saveSuccess && (
+        <div className="bg-emerald-950/40 border border-emerald-800/50 rounded-2xl px-4 py-3 text-sm text-emerald-300 flex items-center space-x-2">
+          <CheckCircle2 className="w-4 h-4" />
+          <span>{saveSuccess}</span>
+        </div>
+      )}
+      {saveError && !isManualModalOpen && (
+        <div className="bg-rose-950/40 border border-rose-800/50 rounded-2xl px-4 py-3 text-sm text-rose-300 flex items-center space-x-2">
+          <AlertCircle className="w-4 h-4" />
+          <span>{saveError}</span>
+        </div>
+      )}
 
       {/* Webhook Configuration Guide */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
@@ -316,10 +368,10 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualWaba}
                   onChange={e => setManualWaba(e.target.value)}
+                  placeholder="e.g. 2248866769241951"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
-
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Phone Number ID *</label>
                 <input
@@ -327,10 +379,10 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualPhoneId}
                   onChange={e => setManualPhoneId(e.target.value)}
+                  placeholder="e.g. 1257112607493238"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
-
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Display Phone Number *</label>
                 <input
@@ -338,10 +390,10 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualDisplayNum}
                   onChange={e => setManualDisplayNum(e.target.value)}
+                  placeholder="+92 300 1234567"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
-
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Permanent System User Access Token *</label>
                 <textarea
@@ -349,9 +401,16 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualToken}
                   onChange={e => setManualToken(e.target.value)}
+                  placeholder="EAAxxxxxxxx (permanent system user token)"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
+
+              {saveError && (
+                <p className="text-rose-400 text-xs flex items-center">
+                  <AlertCircle className="w-3.5 h-3.5 mr-1" /> {saveError}
+                </p>
+              )}
 
               <div className="flex justify-end space-x-3 pt-3 border-t border-slate-800">
                 <button
@@ -363,9 +422,10 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-semibold shadow-md shadow-emerald-950"
+                  disabled={isSaving}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-semibold shadow-md shadow-emerald-950"
                 >
-                  Save Credentials
+                  {isSaving ? 'Connecting…' : 'Verify & Save'}
                 </button>
               </div>
             </form>
