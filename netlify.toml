@@ -10,6 +10,12 @@
   node_bundler = "esbuild"
   included_files = ["netlify/lib/**"]
 
+[functions."whatsapp-webhook"]
+  timeout = 26
+
+[functions."products-import"]
+  timeout = 26
+
 # Meta webhook must be served by a Netlify function (plain-text challenge).
 # This must stay above the /api/* Cloud Run proxy, or Facebook gets the SPA HTML.
 [[redirects]]
@@ -57,6 +63,18 @@
 [[redirects]]
   from = "/api/whatsapp/send-test"
   to = "/.netlify/functions/whatsapp-send-test"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/tenants/*"
+  to = "/.netlify/functions/store-profile"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/products/import-from-url"
+  to = "/.netlify/functions/products-import"
   status = 200
   force = true
 

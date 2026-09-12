@@ -44,18 +44,28 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  const isConnected = Boolean(account?.wabaId && phoneNumbers[0]?.phoneNumberId && account.status === 'CONNECTED');
+  const isConnected = Boolean(
+    account?.wabaId &&
+      phoneNumbers[0]?.phoneNumberId &&
+      account.status === 'CONNECTED' &&
+      !/khyber|urban|waba_custom|phone_id_/i.test(account.wabaId)
+  );
 
-  const [manualWaba, setManualWaba] = useState(account?.wabaId || '');
-  const [manualPhoneId, setManualPhoneId] = useState(phoneNumbers[0]?.phoneNumberId || '');
+  const [manualWaba, setManualWaba] = useState('');
+  const [manualPhoneId, setManualPhoneId] = useState('');
   const [manualToken, setManualToken] = useState('');
-  const [manualDisplayNum, setManualDisplayNum] = useState(phoneNumbers[0]?.displayPhoneNumber || '');
+  const [manualDisplayNum, setManualDisplayNum] = useState('');
 
   React.useEffect(() => {
-    setManualWaba(account?.wabaId || '');
-    setManualPhoneId(phoneNumbers[0]?.phoneNumberId || '');
-    setManualDisplayNum(phoneNumbers[0]?.displayPhoneNumber || '');
-  }, [account?.wabaId, phoneNumbers]);
+    const waba = account?.wabaId || '';
+    const phoneId = phoneNumbers[0]?.phoneNumberId || '';
+    const demo = /khyber|urban|waba_custom|phone_id_/i.test(waba + phoneId);
+    if (!demo && isConnected) {
+      setManualWaba(waba);
+      setManualPhoneId(phoneId);
+      setManualDisplayNum(phoneNumbers[0]?.displayPhoneNumber || '');
+    }
+  }, [account?.wabaId, phoneNumbers, isConnected]);
 
   const webhookUrl = `${window.location.origin}/api/whatsapp/webhook`;
   const verifyToken = 'orderdesk_webhook_verify_token_secure';
@@ -368,7 +378,7 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualWaba}
                   onChange={e => setManualWaba(e.target.value)}
-                  placeholder="e.g. 2248866769241951"
+                  placeholder="Paste WABA ID from Meta Developer"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -379,7 +389,7 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualPhoneId}
                   onChange={e => setManualPhoneId(e.target.value)}
-                  placeholder="e.g. 1257112607493238"
+                  placeholder="Paste Phone Number ID from Meta"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -390,7 +400,7 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualDisplayNum}
                   onChange={e => setManualDisplayNum(e.target.value)}
-                  placeholder="+92 300 1234567"
+                  placeholder="Your WhatsApp display number"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -401,7 +411,7 @@ export const WhatsAppSettingsView: React.FC<WhatsAppSettingsViewProps> = ({
                   required
                   value={manualToken}
                   onChange={e => setManualToken(e.target.value)}
-                  placeholder="EAAxxxxxxxx (permanent system user token)"
+                  placeholder="Paste permanent System User token"
                   className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>

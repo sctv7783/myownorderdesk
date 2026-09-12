@@ -36,6 +36,25 @@ import {
   localConfigToAccount
 } from './whatsappLocalConfig';
 
+function storeProfileKey(tenantId: string) {
+  return `orderdesk_store_profile_${tenantId}`;
+}
+
+function applySavedStoreProfile(tenant: Tenant): Tenant {
+  try {
+    const raw = localStorage.getItem(storeProfileKey(tenant.id));
+    if (!raw) return tenant;
+    const saved = JSON.parse(raw) as { name?: string; businessType?: string };
+    return {
+      ...tenant,
+      name: saved.name || tenant.name,
+      businessType: saved.businessType || tenant.businessType
+    };
+  } catch {
+    return tenant;
+  }
+}
+
 export default function App() {
   // Navigation & Tenant state
   const [currentView, setCurrentView] = useState<string>('dashboard');
@@ -109,18 +128,20 @@ export default function App() {
         const list = Array.isArray(data) ? data : (data?.tenants || []);
         if (isMounted) {
           if (list.length > 0) {
-            setTenants(list);
-            setCurrentTenant(list[0]);
+            const named = list.map(applySavedStoreProfile);
+            setTenants(named);
+            setCurrentTenant(named[0]);
           } else {
-            setTenants(fallbackTenants);
-            setCurrentTenant(fallbackTenants[0]);
+            const named = fallbackTenants.map(applySavedStoreProfile);
+            setTenants(named);
+            setCurrentTenant(named[0]);
           }
         }
       } catch (err) {
         console.warn('Error fetching tenants, using fallback:', err);
         if (isMounted) {
-          setTenants(fallbackTenants);
-          setCurrentTenant(fallbackTenants[0]);
+          setTenants(fallbackTenants.map(applySavedStoreProfile));
+          setCurrentTenant(applySavedStoreProfile(fallbackTenants[0]));
         }
       } finally {
         if (isMounted) {
@@ -346,6 +367,25 @@ export default function App() {
   // Handle Add Product
   const handleCreateProduct = async (productData: Partial<Product>) => {
     if (!currentTenant) return;
+    const localProd: Product = {
+      id: `prod_${Date.now()}`,
+      tenantId: currentTenant.id,
+      name: productData.name || 'Untitled',
+      sku: productData.sku || `SKU-${Date.now().toString().slice(-6)}`,
+      description: productData.description || '',
+      price: Number(productData.price || 0),
+      salePrice: productData.salePrice,
+      imageUrl: productData.imageUrl,
+      stockQuantity: Number(productData.stockQuantity || 0),
+      reservedQuantity: 0,
+      availableQuantity: Number(productData.stockQuantity || 0),
+      lowStockThreshold: Number(productData.lowStockThreshold || 5),
+      isActive: productData.isActive !== false,
+      categoryName: productData.categoryName,
+      variants: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
     try {
       const res = await fetch('/api/products', {
         method: 'POST',
@@ -355,13 +395,18 @@ export default function App() {
         },
         body: JSON.stringify(productData)
       });
-      const data = await res.json();
-      const newProd = data.product || (data.id ? data : null);
-      if (newProd) {
-        setProducts(prev => [newProd, ...prev]);
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = null;
       }
+      const newProd = data?.product || (data?.id ? data : null);
+      setProducts(prev => [newProd || localProd, ...prev]);
     } catch (err) {
       console.error('Error creating product:', err);
+      setProducts(prev => [localProd, ...prev]);
     }
   };
 
@@ -422,9 +467,19 @@ export default function App() {
         },
         body: JSON.stringify({ url })
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        return {
+          success: false,
+          error: 'Import API HTML return kar rahi hai. Latest Netlify deploy ke baad dobara try karein.'
+        };
+      }
       if (data.success && Array.isArray(data.products)) {
-        setProducts(prev => [...data.products, ...prev]);
+        const withTenant = data.products.map((p: Product) => ({ ...p, tenantId: currentTenant.id }));
+        setProducts(prev => [...withTenant, ...prev]);
       }
       return data;
     } catch (err: any) {
@@ -635,6 +690,40 @@ export default function App() {
     }
   };
 
+  const handleRenameStore = async (name: string, businessType?: string): Promise<boolean> => {
+    if (!currentTenant || !name.trim()) return false;
+    const updated: Tenant = {
+      ...currentTenant,
+      name: name.trim(),
+      businessType: (businessType || currentTenant.businessType).trim() || currentTenant.businessType,
+      slug: name
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, ''),
+      updatedAt: new Date().toISOString()
+    };
+    localStorage.setItem(
+      storeProfileKey(currentTenant.id),
+      JSON.stringify({ name: updated.name, businessType: updated.businessType })
+    );
+    setCurrentTenant(updated);
+    setTenants(prev => prev.map(t => (t.id === updated.id ? updated : t)));
+    try {
+      await fetch(`/api/tenants/${currentTenant.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-tenant-id': currentTenant.id
+        },
+        body: JSON.stringify({ name: updated.name, businessType: updated.businessType })
+      });
+    } catch (err) {
+      console.warn('Store name saved locally; API sync skipped:', err);
+    }
+    return true;
+  };
+
   if (isLoading || !currentTenant) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">
@@ -673,7 +762,7 @@ export default function App() {
         tenants={tenants}
         currentTenant={currentTenant}
         onSelectTenant={tenant => {
-          setCurrentTenant(tenant);
+          setCurrentTenant(applySavedStoreProfile(tenant));
           setSelectedConvId(null);
         }}
         onOpenSimulator={() => setCurrentView('simulator')}
@@ -702,6 +791,7 @@ export default function App() {
               products={products}
               onNavigate={setCurrentView}
               onSelectOrder={setSelectedOrder}
+              onRenameStore={handleRenameStore}
             />
           )}
 
@@ -807,6 +897,7 @@ export default function App() {
               products={products}
               onNavigate={setCurrentView}
               onSelectOrder={setSelectedOrder}
+              onRenameStore={handleRenameStore}
             />
           )}
         </main>

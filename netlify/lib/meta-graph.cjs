@@ -100,10 +100,39 @@ async function sendWhatsAppText({ phoneNumberId, accessToken, to, text }) {
   return { success: true, messageId: data.messages?.[0]?.id };
 }
 
+async function markMessageAsRead({ phoneNumberId, accessToken, messageId }) {
+  const token = String(accessToken || '').trim();
+  const phoneId = String(phoneNumberId || '').trim();
+  const wamid = String(messageId || '').trim();
+  if (!phoneId || !wamid || isPlaceholderToken(token)) {
+    return { success: false, error: 'Missing credentials or message id' };
+  }
+
+  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneId)}/messages`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      status: 'read',
+      message_id: wamid
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { success: false, error: data.error?.message || 'Failed to mark message as read' };
+  }
+  return { success: true };
+}
+
 module.exports = {
   GRAPH_VERSION,
   isPlaceholderToken,
   normalizePhone,
   verifyMetaCredentials,
-  sendWhatsAppText
+  sendWhatsAppText,
+  markMessageAsRead
 };

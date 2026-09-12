@@ -5,7 +5,7 @@ import dotenv from 'dotenv';
 import { db, generateId } from './server/db';
 import { metaWhatsAppService, resolveMetaAccessToken } from './server/whatsapp/meta-service';
 import { processCustomerMessageWithAi, MANDATORY_GROQ_MODEL } from './server/ai/groq';
-import { syncSupabaseWithStore, persistOrderStatusToSupabase, persistWhatsAppConnectionToSupabase } from './server/supabase';
+import { syncSupabaseWithStore, persistOrderStatusToSupabase, persistWhatsAppConnectionToSupabase, persistBusinessNameToSupabase } from './server/supabase';
 import { scrapeProductsFromUrl } from './server/services/scraper';
 
 dotenv.config();
@@ -160,6 +160,33 @@ app.get('/api/auth/me', (req, res) => {
 
 app.get('/api/tenants', (req, res) => {
   res.json({ tenants: db.tenants });
+});
+
+app.patch('/api/tenants/:id', async (req, res) => {
+  const tenantId = req.params.id || getTenantId(req);
+  const name = String(req.body?.name || '').trim();
+  const businessType = String(req.body?.businessType || '').trim();
+  if (!name) {
+    return res.status(400).json({ success: false, error: 'Store name is required.' });
+  }
+  const tenant = db.updateTenant(tenantId, { name, businessType: businessType || undefined });
+  if (!tenant) {
+    const created = {
+      id: tenantId,
+      name,
+      slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+      businessType: businessType || 'E-Commerce',
+      currency: 'PKR',
+      timezone: 'Asia/Karachi',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    db.tenants.unshift(created as any);
+    await persistBusinessNameToSupabase(tenantId, name, businessType);
+    return res.json({ success: true, tenant: created });
+  }
+  await persistBusinessNameToSupabase(tenantId, tenant.name, tenant.businessType);
+  res.json({ success: true, tenant });
 });
 
 // -------------------------------------------------------------

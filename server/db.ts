@@ -493,6 +493,28 @@ export class OrderDeskStore {
     return this.tenants.find(t => t.id === id);
   }
 
+  updateTenant(
+    tenantId: string,
+    updates: Partial<Pick<Tenant, 'name' | 'businessType' | 'currency' | 'timezone' | 'slug'>>
+  ): Tenant | undefined {
+    const tenant = this.tenants.find(t => t.id === tenantId);
+    if (!tenant) return undefined;
+    if (updates.name && updates.name.trim()) {
+      tenant.name = updates.name.trim();
+      tenant.slug = updates.slug || tenant.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    }
+    if (updates.businessType) tenant.businessType = updates.businessType;
+    if (updates.currency) tenant.currency = updates.currency;
+    if (updates.timezone) tenant.timezone = updates.timezone;
+    tenant.updatedAt = new Date().toISOString();
+    const bp = this.businessProfiles.find(p => p.tenantId === tenantId);
+    if (bp && updates.name) {
+      bp.businessName = tenant.name;
+      bp.updatedAt = tenant.updatedAt;
+    }
+    return tenant;
+  }
+
   getTenantBySlug(slug: string): Tenant | undefined {
     return this.tenants.find(t => t.slug === slug);
   }

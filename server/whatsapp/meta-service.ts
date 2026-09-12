@@ -171,6 +171,40 @@ export class MetaWhatsAppService {
     }
   }
 
+  async markMessageAsRead(
+    phoneNumberId: string,
+    accessToken: string,
+    messageId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const token = resolveMetaAccessToken({ accessTokenEncrypted: accessToken });
+    if (!phoneNumberId || !messageId || !token || token === 'mock_token') {
+      return { success: false, error: 'Missing credentials' };
+    }
+    try {
+      const url = `https://graph.facebook.com/${this.graphVersion}/${phoneNumberId}/messages`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          status: 'read',
+          message_id: messageId
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        console.warn('[Meta mark-as-read]:', data.error?.message || data);
+        return { success: false, error: data.error?.message };
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  }
+
   // Process incoming Meta Webhook
   async processWebhookEvent(payload: MetaWebhookPayload): Promise<{ handled: boolean; results: any[] }> {
     const results: any[] = [];
@@ -186,11 +220,17 @@ export class MetaWhatsAppService {
         if (!val || !val.metadata) continue;
 
         const receivingPhoneNumberId = val.metadata.phone_number_id;
+        const envToken = process.env.META_ACCESS_TOKEN || '';
 
         // Step 1: Identify Tenant strictly from Phone Number ID
         const tenantResolution = db.getTenantByPhoneNumberId(receivingPhoneNumberId);
         if (!tenantResolution) {
-          console.warn(`[Webhook Warning] Unrecognized Phone Number ID: ${receivingPhoneNumberId}. Ignoring message to prevent cross-tenant leakage.`);
+          console.warn(`[Webhook Warning] Unrecognized Phone Number ID: ${receivingPhoneNumberId}. Still marking as read if token exists.`);
+          if (val.messages && envToken) {
+            for (const msg of val.messages) {
+              await this.markMessageAsRead(receivingPhoneNumberId, envToken, msg.id);
+            }
+          }
           results.push({ status: 'IGNORED_UNKNOWN_PHONE_ID', phoneNumberId: receivingPhoneNumberId });
           continue;
         }
@@ -210,6 +250,9 @@ export class MetaWhatsAppService {
             }
 
             db.recordWebhookEvent(tenantId, externalMsgId, 'whatsapp_message', msg);
+
+            const account = db.getWhatsAppAccount(tenantId);
+            await this.markMessageAsRead(receivingPhoneNumberId, resolveMetaAccessToken(account), externalMsgId);
 
             // Step 3: Extract customer info
             const senderPhone = `+${msg.from.replace(/\D/g, '')}`;
@@ -246,7 +289,6 @@ export class MetaWhatsAppService {
             );
 
             // Step 8: Send outgoing response through the SAME business number
-            const account = db.getWhatsAppAccount(tenantId);
             const token = resolveMetaAccessToken(account);
 
             const sendRes = await this.sendTextMessage(

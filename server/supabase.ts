@@ -585,3 +585,39 @@ export async function persistMessageToSupabase(msg: ConversationMessage, tenantI
     console.warn('[Supabase Insert Message Exception]:', e);
   }
 }
+
+export async function persistBusinessNameToSupabase(
+  tenantId: string,
+  name: string,
+  businessType?: string
+): Promise<boolean> {
+  const client = getSupabaseServerClient();
+  if (!client) return false;
+  const now = new Date().toISOString();
+  try {
+    const { error: bizErr } = await client
+      .from('businesses')
+      .update({
+        name,
+        business_type: businessType || undefined,
+        updated_at: now
+      })
+      .eq('id', tenantId);
+    if (!bizErr) return true;
+    console.warn('[Supabase Business Name]:', bizErr.message);
+  } catch (e: any) {
+    console.warn('[Supabase Business Name Exception]:', e?.message || e);
+  }
+  try {
+    await client
+      .from('business_profiles')
+      .update({
+        business_name: name,
+        updated_at: now
+      })
+      .eq('business_id', tenantId);
+    return true;
+  } catch {
+    return false;
+  }
+}

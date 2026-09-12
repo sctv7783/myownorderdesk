@@ -10,7 +10,10 @@ import {
   CheckCircle2,
   Clock,
   User,
-  Plus
+  Plus,
+  Pencil,
+  Check,
+  X
 } from 'lucide-react';
 import { Tenant, Order, Conversation, Product } from '../types';
 
@@ -32,6 +35,7 @@ interface DashboardOverviewProps {
   products: Product[];
   onNavigate: (view: string) => void;
   onSelectOrder: (order: Order) => void;
+  onRenameStore?: (name: string, businessType?: string) => Promise<boolean>;
 }
 
 export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
@@ -41,8 +45,27 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   conversations,
   products,
   onNavigate,
-  onSelectOrder
+  onSelectOrder,
+  onRenameStore
 }) => {
+  const [isEditingName, setIsEditingName] = React.useState(false);
+  const [draftName, setDraftName] = React.useState(tenant.name);
+  const [draftType, setDraftType] = React.useState(tenant.businessType);
+  const [savingName, setSavingName] = React.useState(false);
+
+  React.useEffect(() => {
+    setDraftName(tenant.name);
+    setDraftType(tenant.businessType);
+  }, [tenant.id, tenant.name, tenant.businessType]);
+
+  const saveStoreName = async () => {
+    if (!draftName.trim() || !onRenameStore) return;
+    setSavingName(true);
+    const ok = await onRenameStore(draftName.trim(), draftType.trim());
+    setSavingName(false);
+    if (ok) setIsEditingName(false);
+  };
+
   const recentOrders = orders.slice(0, 5);
   const activeChats = conversations.slice(0, 4);
   const lowStock = products.filter(p => p.stockQuantity <= p.lowStockThreshold);
@@ -53,10 +76,59 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
       <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center space-x-2">
-            <h1 className="text-2xl font-bold text-white tracking-tight">{tenant.name}</h1>
-            <span className="bg-emerald-500/10 text-emerald-400 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-emerald-500/20">
-              {tenant.businessType}
-            </span>
+            {isEditingName ? (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                <input
+                  autoFocus
+                  value={draftName}
+                  onChange={e => setDraftName(e.target.value)}
+                  className="bg-slate-800 border border-emerald-500/50 rounded-xl px-3 py-1.5 text-lg font-bold text-white focus:outline-none"
+                  placeholder="Store name"
+                />
+                <input
+                  value={draftType}
+                  onChange={e => setDraftType(e.target.value)}
+                  className="bg-slate-800 border border-slate-600 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none"
+                  placeholder="Business type"
+                />
+                <button
+                  type="button"
+                  onClick={saveStoreName}
+                  disabled={savingName || !draftName.trim()}
+                  className="p-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  <Check className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraftName(tenant.name);
+                    setDraftType(tenant.businessType);
+                    setIsEditingName(false);
+                  }}
+                  className="p-2 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <>
+                <h1 className="text-2xl font-bold text-white tracking-tight">{tenant.name}</h1>
+                <span className="bg-emerald-500/10 text-emerald-400 text-xs font-semibold px-2.5 py-0.5 rounded-full border border-emerald-500/20">
+                  {tenant.businessType}
+                </span>
+                {onRenameStore && (
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingName(true)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                    title="Change store name"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                )}
+              </>
+            )}
           </div>
           <p className="text-sm text-slate-400 mt-1">
             WhatsApp Order Automation active • Real-time AI Agent powered by Groq (<span className="text-emerald-400 font-mono text-xs">openai/gpt-oss-20b</span>)

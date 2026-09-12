@@ -85,7 +85,22 @@ async function saveConfig(tenantId, data) {
     return { persisted: false, record };
   }
   await store.setJSON(tenantKey(tenantId), record);
+  if (record.phoneNumberId) {
+    await store.setJSON(`phone:${record.phoneNumberId}`, record);
+  }
   return { persisted: true, record };
+}
+
+async function loadConfigByPhone(phoneNumberId) {
+  if (!phoneNumberId) return null;
+  const store = await getBlobStore();
+  if (!store) return null;
+  try {
+    return (await store.get(`phone:${phoneNumberId}`, { type: 'json' })) || null;
+  } catch (err) {
+    console.warn('[WhatsApp Store] Phone lookup failed:', err?.message || err);
+    return null;
+  }
 }
 
 function configResponse(record, extras) {
@@ -104,6 +119,7 @@ function configResponse(record, extras) {
 
 module.exports = {
   loadConfig,
+  loadConfigByPhone,
   saveConfig,
   publicAccount,
   publicPhone,

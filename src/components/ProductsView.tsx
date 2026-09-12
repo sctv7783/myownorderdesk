@@ -13,9 +13,94 @@ import {
   Loader2,
   CheckCircle2,
   ExternalLink,
-  DollarSign
+  DollarSign,
+  ImagePlus,
+  Upload
 } from 'lucide-react';
 import { Product, Tenant } from '../types';
+
+function fileToCompressedDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read image'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Invalid image file'));
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const max = 900;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(String(reader.result));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.72));
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+const ProductImageField: React.FC<{
+  value: string;
+  onChange: (value: string) => void;
+}> = ({ value, onChange }) => {
+  const [busy, setBusy] = useState(false);
+
+  const onFile = async (file?: File | null) => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const dataUrl = await fileToCompressedDataUrl(file);
+      onChange(dataUrl);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <label className="block text-slate-400 mb-1 font-medium">Product Image</label>
+      <label className="flex items-center justify-center gap-2 w-full cursor-pointer bg-slate-800 hover:bg-slate-700 border border-dashed border-slate-600 rounded-xl px-3 py-3 text-slate-200">
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4 text-emerald-400" />}
+        <span>{busy ? 'Compressing photo…' : 'Upload from phone / PC / laptop'}</span>
+        <input
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={e => onFile(e.target.files?.[0])}
+        />
+      </label>
+      <input
+        type="text"
+        placeholder="Or paste an image link (optional)"
+        value={value.startsWith('data:') ? '' : value}
+        onChange={e => onChange(e.target.value)}
+        className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
+      />
+      {value ? (
+        <div className="flex items-center gap-3">
+          <img src={value} alt="Product preview" className="w-16 h-16 rounded-xl object-cover border border-slate-700" />
+          <button type="button" onClick={() => onChange('')} className="text-rose-400 text-[11px]">
+            Remove image
+          </button>
+        </div>
+      ) : (
+        <p className="text-[11px] text-slate-500 flex items-center gap-1">
+          <ImagePlus className="w-3 h-3" /> Gallery, camera, or files se photo choose karein.
+        </p>
+      )}
+    </div>
+  );
+};
 
 interface ProductsViewProps {
   tenant: Tenant;
@@ -609,16 +694,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-slate-400 mb-1 font-medium">Image URL</label>
-                <input
-                  type="url"
-                  placeholder="https://example.com/image.jpg"
-                  value={editImageUrl}
-                  onChange={e => setEditImageUrl(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-indigo-500"
-                />
-              </div>
+              <ProductImageField value={editImageUrl} onChange={setEditImageUrl} />
 
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Description (Used by Groq AI Agent)</label>
@@ -767,16 +843,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-slate-400 mb-1 font-medium">Image URL</label>
-                <input
-                  type="url"
-                  placeholder="https://..."
-                  value={newImageUrl}
-                  onChange={e => setNewImageUrl(e.target.value)}
-                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
-                />
-              </div>
+              <ProductImageField value={newImageUrl} onChange={setNewImageUrl} />
 
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Product Description (Used by AI)</label>
