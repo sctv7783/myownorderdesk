@@ -57,6 +57,8 @@ function defaultAgentSettings(tenantId: string): AgentSettings {
     updatedAt: new Date().toISOString()
   };
 }
+
+function storeProfileKey(tenantId: string) {
   return `orderdesk_store_profile_${tenantId}`;
 }
 
