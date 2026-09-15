@@ -230,10 +230,12 @@ function catalogText(products) {
   if (!products || !products.length) return '';
   return products
     .filter((p) => p.isActive !== false)
-    .slice(0, 40)
+    .slice(0, 60)
     .map((p) => {
       const price = p.salePrice || p.price;
-      return `- ${p.name} | Rs. ${price} | stock ${p.stockQuantity} | SKU ${p.sku || '-'}`;
+      const img = p.imageUrl ? ` | photo ${p.imageUrl}` : ' | photo none';
+      const desc = p.description ? ` | ${String(p.description).slice(0, 80)}` : '';
+      return `- id:${p.id} | ${p.name} | Rs. ${price} | stock ${p.stockQuantity} | SKU ${p.sku || '-'}${img}${desc}`;
     })
     .join('\n');
 }

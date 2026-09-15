@@ -10,11 +10,34 @@ const VERIFY_TOKENS = new Set(
 );
 
 const { loadConfig, loadConfigByPhone } = require('../lib/whatsapp-store.cjs');
-const { markMessageAsRead, sendWhatsAppText } = require('../lib/meta-graph.cjs');
+const { markMessageAsRead, sendWhatsAppText, sendWhatsAppImage } = require('../lib/meta-graph.cjs');
 const { generateAgentReply } = require('../lib/groq-agent.cjs');
 const { appendMessage } = require('../lib/conversations.cjs');
 const { getBusiness, findBusinessIdByPhone } = require('../lib/business.cjs');
 const { isUuid } = require('../lib/supabase-rest.cjs');
+
+function incomingFromMessage(msg) {
+  if (msg.type === 'location' && msg.location) {
+    const loc = msg.location;
+    return `Delivery location: ${[loc.name, loc.address].filter(Boolean).join(', ')} (lat ${loc.latitude}, lng ${loc.longitude})`.trim();
+  }
+  if (msg.type === 'contacts' && Array.isArray(msg.contacts)) {
+    return `Customer shared contact: ${msg.contacts.map((c) => c.name?.formatted_name || '').join(', ')}`;
+  }
+  return (
+    msg.text?.body ||
+    msg.button?.text ||
+    msg.interactive?.button_reply?.title ||
+    msg.image?.caption ||
+    msg.video?.caption ||
+    msg.document?.caption ||
+    (msg.type === 'image'
+      ? '[Customer sent a photo. Match it to a catalog product if you can and help them order.]'
+      : msg.type && msg.type !== 'text'
+        ? `[${msg.type}]`
+        : '')
+  );
+}
 
 function firstValue(value) {
   if (Array.isArray(value)) return value[0];
@@ -125,18 +148,14 @@ async function handleIncoming(payload) {
         const contactName =
           val.contacts?.find((c) => c.wa_id === msg.from)?.profile?.name ||
           `Customer ${senderPhone.slice(-4)}`;
-        const incomingText =
-          msg.text?.body ||
-          msg.button?.text ||
-          msg.interactive?.button_reply?.title ||
-          (msg.type && msg.type !== 'text' ? `[${msg.type}]` : '');
+        const incomingText = incomingFromMessage(msg);
 
         if (token && phoneId) {
-          await markMessageAsRead({
+          markMessageAsRead({
             phoneNumberId: phoneId,
             accessToken: token,
             messageId: msg.id
-          });
+          }).catch(() => {});
         }
 
         const savedIn = await appendMessage(tenantId, {
@@ -158,27 +177,49 @@ async function handleIncoming(payload) {
           customerName: contactName,
           customerPhone: senderPhone,
           businessName: store?.name || stored?.verifiedName || stored?.businessName,
-          conversationId: savedIn?.conversation?.id
+          conversationId: savedIn?.conversation?.id,
+          conversationStatus: savedIn?.conversation?.status
         });
 
-        if (result.skipped || !result.reply) {
+        if (result.skipped) {
           continue;
         }
 
-        await sendWhatsAppText({
-          phoneNumberId: phoneId,
-          accessToken: token,
-          to: msg.from,
-          text: result.reply
-        });
+        await Promise.all(
+          (result.images || []).map(async (image) => {
+            await sendWhatsAppImage({
+              phoneNumberId: phoneId,
+              accessToken: token,
+              to: msg.from,
+              imageUrl: image.imageUrl,
+              caption: image.caption
+            });
+            await appendMessage(tenantId, {
+              customerPhone: senderPhone,
+              customerName: contactName,
+              phoneNumberId: phoneId,
+              sender: 'AI',
+              text: `[Photo] ${image.caption}`
+            });
+          })
+        );
 
-        await appendMessage(tenantId, {
-          customerPhone: senderPhone,
-          customerName: contactName,
-          phoneNumberId: phoneId,
-          sender: 'AI',
-          text: result.reply
-        });
+        if (result.reply) {
+          await sendWhatsAppText({
+            phoneNumberId: phoneId,
+            accessToken: token,
+            to: msg.from,
+            text: result.reply
+          });
+
+          await appendMessage(tenantId, {
+            customerPhone: senderPhone,
+            customerName: contactName,
+            phoneNumberId: phoneId,
+            sender: 'AI',
+            text: result.reply
+          });
+        }
       }
     }
   }

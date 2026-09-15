@@ -51,19 +51,24 @@ exports.handler = async function handler(event) {
   const aiResponse =
     result.reply ||
     'Staff mode active hai — AI auto-reply band hai. Inbox se human reply bhejein.';
+  const photoNotes = (result.images || [])
+    .map((img) => `[Photo sent] ${img.caption}`)
+    .join('\n');
+  const combined = photoNotes ? `${photoNotes}\n${aiResponse}` : aiResponse;
 
   await appendMessage(tenantId, {
     customerPhone,
     customerName,
     sender: 'AI',
-    text: aiResponse
+    text: combined
   });
 
   return json(200, {
     success: true,
     conversationId: savedIn?.conversation?.id || null,
     userMessage: message,
-    aiResponse,
+    aiResponse: combined,
+    images: result.images || [],
     model: GROQ_MODEL,
     groqConfigured: Boolean(process.env.GROQ_API_KEY),
     handoff: Boolean(result.handoff),

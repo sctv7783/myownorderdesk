@@ -100,6 +100,40 @@ async function sendWhatsAppText({ phoneNumberId, accessToken, to, text }) {
   return { success: true, messageId: data.messages?.[0]?.id };
 }
 
+async function sendWhatsAppImage({ phoneNumberId, accessToken, to, imageUrl, caption }) {
+  const token = String(accessToken || '').trim();
+  const phoneId = String(phoneNumberId || '').trim();
+  const cleanedTo = normalizePhone(to);
+  const link = String(imageUrl || '').trim();
+  if (!phoneId || isPlaceholderToken(token) || !cleanedTo || !/^https?:\/\//i.test(link)) {
+    return { success: false, error: 'Image URL or WhatsApp credentials missing.' };
+  }
+
+  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneId)}/messages`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: cleanedTo,
+      type: 'image',
+      image: {
+        link,
+        caption: String(caption || '').slice(0, 1024)
+      }
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { success: false, error: data.error?.message || 'Failed to send WhatsApp image.' };
+  }
+  return { success: true, messageId: data.messages?.[0]?.id };
+}
+
 async function markMessageAsRead({ phoneNumberId, accessToken, messageId }) {
   const token = String(accessToken || '').trim();
   const phoneId = String(phoneNumberId || '').trim();
@@ -134,5 +168,6 @@ module.exports = {
   normalizePhone,
   verifyMetaCredentials,
   sendWhatsAppText,
+  sendWhatsAppImage,
   markMessageAsRead
 };

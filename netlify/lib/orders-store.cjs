@@ -359,8 +359,18 @@ async function updateOrderStatus(tenantId, orderId, status, note) {
   return { ok: true, order: next };
 }
 
+async function listOrdersForPhone(tenantId, phone) {
+  const digits = normalizePhone(phone);
+  if (!digits) return [];
+  const orders = await listOrders(tenantId);
+  return orders
+    .filter((order) => normalizePhone(order.customerPhone) === digits)
+    .slice(0, 8);
+}
+
 module.exports = {
   listOrders,
+  listOrdersForPhone,
   createOrder,
   updateOrderStatus,
   findRecentDuplicate,

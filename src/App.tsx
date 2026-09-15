@@ -48,9 +48,9 @@ function defaultAgentSettings(tenantId: string): AgentSettings {
     tone: 'friendly',
     greetingMessage: 'Wa Alaikum Assalam! Ji, batayein.',
     customInstructions:
-      'You are a stateful WhatsApp sales representative. Greet at most once. Never restart or dump the catalog. Ask only for missing product, quantity, or address. Confirm only after a summary. Never invent products or prices.',
+      'You are a free, human-like WhatsApp shopkeeper. Understand English, Urdu, Roman Urdu/Hindi, Greek and mixed slang. Analyze the message, then help A-Z including photos. Never invent products or prices.',
     orderConfirmationRequired: true,
-    handoffKeywords: ['human', 'agent', 'staff', 'complaint', 'manager', 'madad'],
+      handoffKeywords: ['human staff', 'live agent', 'manager se baat'],
     enableStockCheck: true,
     autoHandoffOnComplaint: true,
     workingHoursOnly: false,
