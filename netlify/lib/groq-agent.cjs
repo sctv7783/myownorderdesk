@@ -1,12 +1,50 @@
 const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
 const { loadAiSettings, loadStoreProfile } = require('./ai-settings-store.cjs');
-const { listConversations, listMessages, setConversationStatus } = require('./inbox-store.cjs');
+const { listConversations, listMessages, setConversationStatus } = require('./conversations.cjs');
+const { listProducts, catalogText } = require('./products-store.cjs');
+const { getBusiness } = require('./business.cjs');
 
 function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '');
 }
 
-function buildSystemPrompt({ businessName, settings, knowledge, customerName, customerPhone, historyText }) {
+function wantsProductList(text) {
+  const t = String(text || '').toLowerCase();
+  return /product|catalog|menu|list|items|saare|sari|saari|dikha|dikhao|dikh|all product|poori list|pura list/.test(
+    t
+  );
+}
+
+function wantsStoreName(text) {
+  const t = String(text || '').toLowerCase();
+  return /store ka naam|store ka name|tumhara naam|tumhara name|your name|business name|shop ka naam/.test(
+    t
+  );
+}
+
+function formatCatalogReply(businessName, products) {
+  const active = (products || []).filter((p) => p.isActive !== false);
+  if (!active.length) {
+    return `${businessName} ki catalog abhi empty hai. Dashboard se products add/import karein, phir main yahan list bhej doonga.`;
+  }
+  const lines = active.slice(0, 20).map((p, i) => {
+    const price = p.salePrice || p.price;
+    return `${i + 1}) ${p.name} — Rs. ${Number(price).toLocaleString()} (stock ${p.stockQuantity})`;
+  });
+  const extra = active.length > 20 ? `\n+${active.length - 20} more items.` : '';
+  return `${businessName} ke available products:\n${lines.join('\n')}${extra}\n\nKis item ki quantity aur delivery address bhejain?`;
+}
+
+function buildSystemPrompt({
+  businessName,
+  settings,
+  knowledge,
+  customerName,
+  customerPhone,
+  historyText,
+  catalog,
+  isFirstMessage
+}) {
   const faqs = (knowledge || [])
     .filter((k) => k && k.isActive !== false)
     .slice(0, 20)
@@ -14,53 +52,59 @@ function buildSystemPrompt({ businessName, settings, knowledge, customerName, cu
     .join('\n');
 
   const tone = settings?.tone || 'friendly';
-  const lang = settings?.primaryLanguage || 'auto';
   const greeting = settings?.greetingMessage || `Assalam-o-Alaikum! ${businessName} mein khush amdeed.`;
   const extra = settings?.customInstructions || '';
 
-  return `You are the official WhatsApp AI order desk agent for "${businessName}".
-Platform: WhatsApp.
-Customer: ${customerName || 'Customer'} (${customerPhone || 'unknown'}).
+  return `You are the official WhatsApp order-desk agent for "${businessName}".
+Your name is "${businessName} Order Assistant". Never invent a human name. Never write placeholders like [Name], {name}, or "Mera naam [Name] hai".
+Customer display name: ${customerName && !/\[name\]/i.test(customerName) ? customerName : 'Customer'} (${customerPhone || 'unknown'}).
 
-LANGUAGE:
-Speak in the customer's language (Urdu, Roman Urdu, or English). Default language mode: ${lang}.
-Tone: ${tone}. Keep replies short and WhatsApp-friendly (1-6 short lines).
+STRICT RULES:
+- Reply in the customer's language (Urdu / Roman Urdu / English). Tone: ${tone}.
+- Keep replies 1-8 short WhatsApp lines.
+- ${isFirstMessage ? `First message only, you may greet like: ${greeting}` : 'Do NOT greet again. Do NOT say Assalam-o-Alaikum again. Answer the latest question directly.'}
+- When asked for products / list / menu / "all products", list REAL catalog items with prices. Do not ask "phones, laptops, accessories" if a catalog exists.
+- Quote ONLY names and prices from the catalog below. Never invent products or prices.
+- If catalog is empty, say catalog is empty and ask them to wait while staff adds products.
+- Before confirming an order: quantity + full delivery address.
+- After address, recap item, price, address, then ask for haan/confirm.
+- If they ask your name or store name, answer: "${businessName}".
 
-GREETING STYLE (use on first contact or when they say salam):
-${greeting}
+TRAINING INSTRUCTIONS:
+${extra || 'Be polite. Confirm quantity and address before finalizing. COD unless told otherwise.'}
 
-TRAINING / BUSINESS INSTRUCTIONS (follow these exactly):
-${extra || 'Be polite. Confirm quantity and full delivery address before finalizing any order. Cash on delivery unless told otherwise.'}
+FAQs:
+${faqs || '(none)'}
 
-STORE KNOWLEDGE / FAQs:
-${faqs || 'No extra FAQs saved yet. Do not invent policies or exact prices if unknown — ask what they want.'}
+LIVE PRODUCT CATALOG:
+${catalog || '(empty — do not invent products)'}
 
-ORDER WORKFLOW:
-1. Help with products, prices, delivery, and taking orders.
-2. Quote only facts from training/FAQs above. If price/stock is unknown, ask a clarifying question.
-3. Before confirming an order, collect quantity AND a full delivery address (house, street, area, city).
-4. After address is given, recap item + total if known + address, then ask for confirmation (haan / yes / confirm).
-5. After clear confirmation, thank them and say the order is noted for staff. Do not invent an order number unless one is provided in history.
-6. If the customer asks for a human, manager, or files a complaint, tell them staff will take over.
-
-Recent conversation:
+Recent chat:
 ${historyText || '(new chat)'}`;
 }
 
 async function generateAgentReply(incomingText, options = {}) {
-  const tenantId = options.tenantId || process.env.DEFAULT_TENANT_ID || 'tenant_khyber_001';
+  const tenantId = options.tenantId;
   const text = String(incomingText || '').trim();
-  const customerName = options.customerName || 'Customer';
+  const customerName = options.customerName && !/\[name\]/i.test(options.customerName)
+    ? options.customerName
+    : 'Customer';
   const customerPhone = options.customerPhone || '';
 
-  const [{ settings, knowledge }, profile] = await Promise.all([
+  const [aiRecord, profile, business, products] = await Promise.all([
     loadAiSettings(tenantId),
-    loadStoreProfile(tenantId)
+    loadStoreProfile(tenantId),
+    getBusiness(tenantId),
+    listProducts(tenantId)
   ]);
 
+  const settings = aiRecord.settings;
+  const knowledge = aiRecord.knowledge;
+  const fromMeta = options.businessName;
   const businessName =
-    options.businessName ||
+    business?.name ||
     profile?.name ||
+    (fromMeta && !/whatsapp business/i.test(fromMeta) ? fromMeta : '') ||
     options.verifiedName ||
     'our store';
 
@@ -75,23 +119,42 @@ async function generateAgentReply(incomingText, options = {}) {
     if (options.conversationId) {
       await setConversationStatus(tenantId, options.conversationId, 'HUMAN_ACTIVE');
     }
-    const reply =
-      settings.primaryLanguage === 'urdu'
-        ? 'Aapki request par conversation staff member ko transfer kar di gayi hai. Humara team member jald aap se rabta karega.'
-        : 'Maine aapki conversation human staff ko transfer kar di hai. A staff member will be with you shortly.';
-    return { reply, skipped: false, handoff: true, settings, model: GROQ_MODEL };
+    return {
+      reply:
+        'Maine aapki conversation human staff ko transfer kar di hai. A staff member will be with you shortly.',
+      skipped: false,
+      handoff: true,
+      settings,
+      model: GROQ_MODEL
+    };
   }
 
   if (!text || text.startsWith('[')) {
     return {
-      reply:
-        'Photo/media receive ho gayi. Barah-e-karam product ka naam ya order detail text mein likhein.',
+      reply: 'Photo/media receive ho gayi. Product ka naam ya order detail text mein likhein.',
+      skipped: false,
+      settings
+    };
+  }
+
+  if (wantsStoreName(text)) {
+    return {
+      reply: `Mera naam ${businessName} ka WhatsApp order assistant hai.\nStore: ${businessName}.`,
+      skipped: false,
+      settings
+    };
+  }
+
+  if (wantsProductList(text)) {
+    return {
+      reply: formatCatalogReply(businessName, products),
       skipped: false,
       settings
     };
   }
 
   let historyText = '';
+  let isFirstMessage = true;
   try {
     const convs = await listConversations(tenantId);
     const phoneDigits = normalizePhone(customerPhone);
@@ -103,6 +166,7 @@ async function generateAgentReply(incomingText, options = {}) {
         return { reply: null, skipped: true, reason: 'human_active', settings };
       }
       const msgs = await listMessages(tenantId, conv.id);
+      isFirstMessage = msgs.length <= 1;
       historyText = msgs
         .slice(-16)
         .filter((m, i, arr) => !(i === arr.length - 1 && m.sender === 'CUSTOMER' && m.text === text))
@@ -115,11 +179,12 @@ async function generateAgentReply(incomingText, options = {}) {
   }
 
   const apiKey = process.env.GROQ_API_KEY;
-  const greeting = settings.greetingMessage || `Assalam o Alaikum! ${businessName} mein khush amdeed.`;
+  const catalog = catalogText(products);
 
   if (!apiKey) {
+    if (products.length) return { reply: formatCatalogReply(businessName, products), skipped: false, settings };
     return {
-      reply: `${greeting}\n\nAapka message receive ho gaya: "${text.slice(0, 80)}"\nGroq API key Netlify env mein set karein taake AI jawab de sake.`,
+      reply: `${businessName}: Groq key missing hai. Staff se rabta karein ya Netlify pe GROQ_API_KEY set karein.`,
       skipped: false,
       groqConfigured: false,
       settings
@@ -135,8 +200,8 @@ async function generateAgentReply(incomingText, options = {}) {
       },
       body: JSON.stringify({
         model: GROQ_MODEL,
-        temperature: 0.2,
-        max_tokens: 600,
+        temperature: 0.15,
+        max_tokens: 700,
         messages: [
           {
             role: 'system',
@@ -146,7 +211,9 @@ async function generateAgentReply(incomingText, options = {}) {
               knowledge,
               customerName,
               customerPhone,
-              historyText
+              historyText,
+              catalog,
+              isFirstMessage
             })
           },
           { role: 'user', content: text }
@@ -156,29 +223,28 @@ async function generateAgentReply(incomingText, options = {}) {
     const groqData = await groqRes.json().catch(() => ({}));
     if (!groqRes.ok) {
       console.error('[Groq]', groqData.error || groqData);
+      if (products.length) {
+        return { reply: formatCatalogReply(businessName, products), skipped: false, settings };
+      }
       return {
-        reply: `${greeting}\nAapka message receive ho gaya. AI abhi respond nahi kar saki (${groqData.error?.message || 'Groq error'}).`,
+        reply: `Aapka message receive ho gaya. AI abhi busy hai (${groqData.error?.message || 'Groq error'}).`,
         skipped: false,
         settings,
         error: groqData.error?.message
       };
     }
-    const reply = groqData.choices?.[0]?.message?.content?.trim();
+    let reply = groqData.choices?.[0]?.message?.content?.trim() || '';
+    reply = reply.replace(/\[Name\]/gi, customerName === 'Customer' ? businessName : customerName);
     if (reply) {
-      return {
-        reply,
-        skipped: false,
-        settings,
-        model: GROQ_MODEL,
-        groqConfigured: true
-      };
+      return { reply, skipped: false, settings, model: GROQ_MODEL, groqConfigured: true };
     }
   } catch (err) {
     console.error('[Groq network]', err);
   }
 
+  if (products.length) return { reply: formatCatalogReply(businessName, products), skipped: false, settings };
   return {
-    reply: `${greeting}\nAapka message receive ho gaya. Order confirm karne ke liye product naam aur address bhejein.`,
+    reply: 'Aapka message receive ho gaya. Product naam, quantity aur delivery address bhejein.',
     skipped: false,
     settings
   };

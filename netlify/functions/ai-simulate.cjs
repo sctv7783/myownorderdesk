@@ -1,5 +1,6 @@
 const { generateAgentReply, GROQ_MODEL } = require('../lib/groq-agent.cjs');
-const { appendMessage } = require('../lib/inbox-store.cjs');
+const { appendMessage } = require('../lib/conversations.cjs');
+const { resolveBusinessId } = require('../lib/business.cjs');
 
 function json(statusCode, payload) {
   return {
@@ -25,8 +26,7 @@ exports.handler = async function handler(event) {
   if (method !== 'POST') return json(405, { success: false, error: 'Method Not Allowed' });
 
   const body = parseBody(event);
-  const tenantId =
-    event.headers?.['x-tenant-id'] || event.headers?.['X-Tenant-Id'] || body.tenantId || 'tenant_khyber_001';
+  const tenantId = await resolveBusinessId(event, body);
   const message = String(body.message || '').trim();
   if (!message) return json(400, { success: false, error: 'Message text is required.' });
 

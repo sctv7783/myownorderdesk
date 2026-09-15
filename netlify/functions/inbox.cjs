@@ -1,4 +1,5 @@
-const { listConversations, listMessages, appendMessage, setConversationStatus } = require('../lib/inbox-store.cjs');
+const { listConversations, listMessages, appendMessage, setConversationStatus } = require('../lib/conversations.cjs');
+const { resolveBusinessId } = require('../lib/business.cjs');
 const { loadConfig } = require('../lib/whatsapp-store.cjs');
 const { sendWhatsAppText } = require('../lib/meta-graph.cjs');
 
@@ -20,16 +21,12 @@ function parseBody(event) {
   }
 }
 
-function tenantIdFrom(event, body) {
-  return event.headers?.['x-tenant-id'] || event.headers?.['X-Tenant-Id'] || body?.tenantId || 'tenant_khyber_001';
-}
-
 exports.handler = async function handler(event) {
   const method = (event.httpMethod || 'GET').toUpperCase();
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
-  const tenantId = tenantIdFrom(event, body);
+  const tenantId = await resolveBusinessId(event, body);
   const path = event.path || '';
   const parts = path.split('/').filter(Boolean);
   const convIdx = parts.lastIndexOf('conversations');

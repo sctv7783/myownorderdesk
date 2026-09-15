@@ -44,9 +44,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onEnterDashboard, onOp
             </button>
             <button
               onClick={onEnterDashboard}
+              className="text-xs text-slate-300 hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-800 transition-colors"
+            >
+              Login
+            </button>
+            <button
+              onClick={onEnterDashboard}
               className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2 rounded-xl transition-all shadow-md shadow-emerald-950 flex items-center space-x-1.5"
             >
-              <span>Open Merchant App</span>
+              <span>Sign up / Open store</span>
               <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>

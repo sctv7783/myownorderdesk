@@ -217,7 +217,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
 
     setIsUpdating(true);
     try {
-      await onUpdateProduct(selectedProductForEdit.id, {
+      const ok = await onUpdateProduct(selectedProductForEdit.id, {
         name: editName.trim(),
         sku: editSku.trim(),
         price: Number(editPrice),
@@ -229,7 +229,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         description: editDesc.trim(),
         isActive: editIsActive
       });
-      setSelectedProductForEdit(null);
+      if (ok) setSelectedProductForEdit(null);
     } catch (err) {
       console.error('Failed to update product:', err);
     } finally {

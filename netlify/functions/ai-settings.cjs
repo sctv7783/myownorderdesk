@@ -1,4 +1,5 @@
-const { loadAiSettings, saveAiSettings, defaults } = require('../lib/ai-settings-store.cjs');
+const { loadAiSettings, saveAiSettings, defaults, addKnowledgeItem, deleteKnowledgeItem } = require('../lib/ai-settings-store.cjs');
+const { resolveBusinessId } = require('../lib/business.cjs');
 
 function json(statusCode, payload) {
   return {
@@ -27,7 +28,7 @@ exports.handler = async function handler(event) {
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
-  const tenantId = tenantIdFrom(event, body);
+  const tenantId = (await resolveBusinessId(event, body)) || tenantIdFrom(event, body);
   const path = event.path || '';
   let record = await loadAiSettings(tenantId);
 
@@ -45,21 +46,16 @@ exports.handler = async function handler(event) {
   if (path.includes('/knowledge') && (method === 'POST' || method === 'DELETE')) {
     if (method === 'DELETE') {
       const id = path.split('/').pop();
+      await deleteKnowledgeItem(tenantId, id);
       record.knowledge = (record.knowledge || []).filter((k) => k.id !== id);
-    } else {
-      const item = {
-        id: `faq_${Date.now()}`,
-        tenantId,
-        category: body.category || 'FAQ',
-        question: body.question || body.title || 'FAQ',
-        answer: body.answer || body.content || '',
-        isActive: true
-      };
-      record.knowledge = record.knowledge || [];
-      record.knowledge.unshift(item);
+      await saveAiSettings(tenantId, record);
+      return json(200, { success: true, knowledge: record.knowledge });
     }
+    const item = await addKnowledgeItem(tenantId, body);
+    record.knowledge = record.knowledge || [];
+    record.knowledge.unshift(item);
     await saveAiSettings(tenantId, record);
-    return json(200, { success: true, knowledge: record.knowledge, item: record.knowledge[0] });
+    return json(200, { success: true, knowledge: record.knowledge, item });
   }
 
   if (method === 'POST' || method === 'PUT') {

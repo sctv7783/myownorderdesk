@@ -23,6 +23,8 @@ interface NavbarProps {
   connectionStatus: 'CONNECTED' | 'DISCONNECTED' | 'ATTENTION_REQUIRED';
   onNavigate: (view: string) => void;
   currentView: string;
+  userEmail?: string;
+  onLogout?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -34,7 +36,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   onMarkNotificationRead,
   connectionStatus,
   onNavigate,
-  currentView
+  currentView,
+  userEmail,
+  onLogout
 }) => {
   const [tenantDropdownOpen, setTenantDropdownOpen] = useState(false);
   const [notifDropdownOpen, setNotifDropdownOpen] = useState(false);
@@ -200,9 +204,21 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* User Profile */}
           <div className="flex items-center space-x-2 pl-2 border-l border-slate-800">
-            <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center font-bold text-xs text-emerald-400">
-              ST
+            <div className="text-right hidden sm:block">
+              <p className="text-[10px] text-slate-400 leading-tight">Signed in</p>
+              <p className="text-xs font-medium text-white max-w-[140px] truncate">{userEmail || 'Merchant'}</p>
             </div>
+            <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center font-bold text-xs text-emerald-400">
+              {(userEmail || 'M').slice(0, 2).toUpperCase()}
+            </div>
+            {onLogout && (
+              <button
+                onClick={onLogout}
+                className="text-[11px] font-semibold text-slate-300 hover:text-white px-2 py-1 rounded-lg hover:bg-slate-800"
+              >
+                Logout
+              </button>
+            )}
           </div>
         </div>
       </div>

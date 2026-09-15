@@ -30,6 +30,8 @@ import { WhatsAppSettingsView } from './components/WhatsAppSettingsView';
 import { TeamView } from './components/TeamView';
 import { BillingView } from './components/BillingView';
 import { OnboardingModal } from './components/OnboardingModal';
+import { AuthView } from './components/AuthView';
+import { authHeaders, clearSession, loadSession, saveSession, AuthUser } from './authSession';
 import {
   loadLocalWhatsAppConfig,
   saveLocalWhatsAppConfig,
@@ -79,11 +81,12 @@ function applySavedStoreProfile(tenant: Tenant): Tenant {
 
 export default function App() {
   // Navigation & Tenant state
-  const [currentView, setCurrentView] = useState<string>('dashboard');
+  const [currentView, setCurrentView] = useState<string>('landing');
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [currentTenant, setCurrentTenant] = useState<Tenant | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState<boolean>(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
 
   // Tenant-isolated domain data
   const [orders, setOrders] = useState<Order[]>([]);
@@ -115,63 +118,73 @@ export default function App() {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [isSendingMessage, setIsSendingMessage] = useState<boolean>(false);
 
-  // Fallback initial tenants in case of slow or offline network
-  const fallbackTenants: Tenant[] = [
-    {
-      id: 'tenant_khyber_001',
-      name: 'Khyber Delight Restaurant',
-      slug: 'khyber-delight',
-      businessType: 'Restaurant',
-      currency: 'PKR',
-      timezone: 'Asia/Karachi',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    },
-    {
-      id: 'tenant_urban_002',
-      name: 'Urban Chic Apparel',
-      slug: 'urban-chic',
-      businessType: 'Clothing',
-      currency: 'PKR',
-      timezone: 'Asia/Karachi',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+  const applyAuth = (data: any) => {
+    if (!data?.accessToken || !data?.user) return false;
+    const tenant = data.tenant || data.tenants?.[0];
+    saveSession({
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+      user: data.user,
+      tenantId: tenant?.id
+    });
+    setAuthUser(data.user);
+    if (tenant) {
+      setTenants((data.tenants || [tenant]).map(applySavedStoreProfile));
+      setCurrentTenant(applySavedStoreProfile(tenant));
     }
-  ];
+    setCurrentView('dashboard');
+    return true;
+  };
 
-  // Fetch all available tenants on mount
+  const handleLogout = () => {
+    clearSession();
+    setAuthUser(null);
+    setCurrentTenant(null);
+    setTenants([]);
+    setProducts([]);
+    setConversations([]);
+    setMessages([]);
+    setCurrentView('landing');
+  };
+
   useEffect(() => {
     let isMounted = true;
-    async function loadTenants() {
-      try {
-        const res = await fetch('/api/tenants');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const list = Array.isArray(data) ? data : (data?.tenants || []);
-        if (isMounted) {
-          if (list.length > 0) {
-            const named = list.map(applySavedStoreProfile);
-            setTenants(named);
-            setCurrentTenant(named[0]);
-          } else {
-            const named = fallbackTenants.map(applySavedStoreProfile);
-            setTenants(named);
-            setCurrentTenant(named[0]);
-          }
-        }
-      } catch (err) {
-        console.warn('Error fetching tenants, using fallback:', err);
-        if (isMounted) {
-          setTenants(fallbackTenants.map(applySavedStoreProfile));
-          setCurrentTenant(applySavedStoreProfile(fallbackTenants[0]));
-        }
-      } finally {
+    async function boot() {
+      const session = loadSession();
+      if (!session?.accessToken) {
         if (isMounted) {
           setIsLoading(false);
+          setCurrentView('landing');
         }
+        return;
+      }
+      try {
+        const res = await fetch('/api/auth/me', { headers: authHeaders(session.tenantId) });
+        const data = await res.json();
+        if (!res.ok || !data.user) throw new Error('unauthorized');
+        if (!isMounted) return;
+        setAuthUser(data.user);
+        const list = data.tenants || (data.tenant ? [data.tenant] : []);
+        if (list.length) {
+          const named = list.map(applySavedStoreProfile);
+          setTenants(named);
+          setCurrentTenant(named[0]);
+          saveSession({ ...session, user: data.user, tenantId: named[0].id });
+          setCurrentView('dashboard');
+        } else {
+          setCurrentView('landing');
+        }
+      } catch {
+        clearSession();
+        if (isMounted) {
+          setAuthUser(null);
+          setCurrentView('landing');
+        }
+      } finally {
+        if (isMounted) setIsLoading(false);
       }
     }
-    loadTenants();
+    boot();
     return () => {
       isMounted = false;
     };
@@ -180,7 +193,7 @@ export default function App() {
   // Fetch all domain data for the active tenant
   const loadTenantData = useCallback(async (tenantId: string) => {
     try {
-      const headers = { 'x-tenant-id': tenantId };
+      const headers = authHeaders(tenantId);
 
       const safeFetch = async (url: string) => {
         try {
@@ -276,7 +289,7 @@ export default function App() {
     const pollInbox = async () => {
       try {
         const res = await fetch('/api/conversations', {
-          headers: { 'x-tenant-id': currentTenant.id }
+          headers: authHeaders(currentTenant.id)
         });
         const raw = await res.text();
         let data: any = null;
@@ -297,6 +310,16 @@ export default function App() {
           if (prev && list.some((c: any) => c.id === prev)) return prev;
           return list[0]?.id || prev;
         });
+
+        const prodRes = await fetch('/api/products', {
+          headers: authHeaders(currentTenant.id)
+        });
+        const prodRaw = await prodRes.text();
+        if (!cancelled && prodRaw && !prodRaw.trimStart().startsWith('<')) {
+          const prodData = JSON.parse(prodRaw);
+          const productsList = Array.isArray(prodData) ? prodData : prodData?.products || [];
+          if (Array.isArray(productsList)) setProducts(productsList);
+        }
       } catch {
         /* ignore poll errors */
       }
@@ -322,7 +345,7 @@ export default function App() {
     async function loadMessages() {
       try {
         const res = await fetch(`/api/conversations/${selectedConvId}/messages`, {
-          headers: { 'x-tenant-id': currentTenant!.id }
+          headers: authHeaders(currentTenant!.id)
         });
         const raw = await res.text();
         if (raw.trimStart().startsWith('<')) return;
@@ -347,10 +370,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/conversations/${selectedConvId}/messages`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({
           text,
           sender: 'STAFF'
@@ -381,10 +401,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/conversations/${selectedConvId}/status`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({ status: newStatus })
       });
       const data = await res.json();
@@ -404,10 +421,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/orders/${orderId}/status`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({ status, note })
       });
       const data = await res.json();
@@ -423,7 +437,7 @@ export default function App() {
         // If conversation is open, refresh messages so the automated WhatsApp update appears
         if (selectedConvId) {
           fetch(`/api/conversations/${selectedConvId}/messages`, {
-            headers: { 'x-tenant-id': currentTenant.id }
+            headers: authHeaders(currentTenant.id)
           })
             .then(res => res.json())
             .then(msgRes => {
@@ -442,32 +456,10 @@ export default function App() {
   // Handle Add Product
   const handleCreateProduct = async (productData: Partial<Product>) => {
     if (!currentTenant) return;
-    const localProd: Product = {
-      id: `prod_${Date.now()}`,
-      tenantId: currentTenant.id,
-      name: productData.name || 'Untitled',
-      sku: productData.sku || `SKU-${Date.now().toString().slice(-6)}`,
-      description: productData.description || '',
-      price: Number(productData.price || 0),
-      salePrice: productData.salePrice,
-      imageUrl: productData.imageUrl,
-      stockQuantity: Number(productData.stockQuantity || 0),
-      reservedQuantity: 0,
-      availableQuantity: Number(productData.stockQuantity || 0),
-      lowStockThreshold: Number(productData.lowStockThreshold || 5),
-      isActive: productData.isActive !== false,
-      categoryName: productData.categoryName,
-      variants: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
     try {
       const res = await fetch('/api/products', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify(productData)
       });
       const raw = await res.text();
@@ -477,32 +469,39 @@ export default function App() {
       } catch {
         data = null;
       }
-      const newProd = data?.product || (data?.id ? data : null);
-      setProducts(prev => [newProd || localProd, ...prev]);
+      const newProd = data?.product;
+      if (newProd?.id) {
+        setProducts(prev => [newProd, ...prev.filter(p => p.id !== newProd.id)]);
+      } else {
+        console.error('Product save failed:', data?.error || raw.slice(0, 180));
+      }
     } catch (err) {
       console.error('Error creating product:', err);
-      setProducts(prev => [localProd, ...prev]);
     }
   };
 
   // Handle Edit/Update Product
   const handleUpdateProduct = async (productId: string, productData: Partial<Product>) => {
-    if (!currentTenant) return;
+    if (!currentTenant) return false;
     try {
       const res = await fetch(`/api/products/${productId}`, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify(productData)
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        return false;
+      }
       const updatedProd = data.product || (data.id ? data : null);
       if (updatedProd) {
-        setProducts(prev => prev.map(p => (p.id === productId ? updatedProd : p)));
+        setProducts(prev => prev.map(p => (p.id === productId ? { ...p, ...updatedProd } : p)));
         return true;
       }
+      return false;
     } catch (err) {
       console.error('Error updating product:', err);
       return false;
@@ -515,15 +514,20 @@ export default function App() {
     try {
       const res = await fetch(`/api/products/${productId}`, {
         method: 'DELETE',
-        headers: {
-          'x-tenant-id': currentTenant.id
-        }
+        headers: authHeaders(currentTenant.id)
       });
-      const data = await res.json();
-      if (data.success) {
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = {};
+      }
+      if (res.ok || data.success) {
         setProducts(prev => prev.filter(p => p.id !== productId));
         return true;
       }
+      return false;
     } catch (err) {
       console.error('Error deleting product:', err);
       return false;
@@ -536,10 +540,7 @@ export default function App() {
     try {
       const res = await fetch('/api/products/import-from-url', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({ url })
       });
       const raw = await res.text();
@@ -554,7 +555,10 @@ export default function App() {
       }
       if (data.success && Array.isArray(data.products)) {
         const withTenant = data.products.map((p: Product) => ({ ...p, tenantId: currentTenant.id }));
-        setProducts(prev => [...withTenant, ...prev]);
+        setProducts(prev => {
+          const ids = new Set(withTenant.map((p: Product) => p.id));
+          return [...withTenant, ...prev.filter(p => !ids.has(p.id))];
+        });
       }
       return data;
     } catch (err: any) {
@@ -569,10 +573,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/products/${productId}/adjust`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({ changeQuantity, notes })
       });
       const data = await res.json();
@@ -590,10 +591,7 @@ export default function App() {
     try {
       const res = await fetch('/api/ai/settings', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify(settingsData)
       });
       const data = await res.json();
@@ -611,10 +609,7 @@ export default function App() {
     try {
       const res = await fetch('/api/ai/knowledge', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify(item)
       });
       const data = await res.json();
@@ -632,7 +627,7 @@ export default function App() {
     try {
       await fetch(`/api/ai/knowledge/${id}`, {
         method: 'DELETE',
-        headers: { 'x-tenant-id': currentTenant.id }
+        headers: authHeaders(currentTenant.id)
       });
       setKnowledgeItems(prev => prev.filter(k => k.id !== id));
     } catch (err) {
@@ -650,10 +645,7 @@ export default function App() {
     try {
       const res = await fetch('/api/whatsapp/config', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify(data)
       });
       const contentType = res.headers.get('content-type') || '';
@@ -687,10 +679,7 @@ export default function App() {
       const local = loadLocalWhatsAppConfig(currentTenant.id);
       const res = await fetch('/api/whatsapp/send-test', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({
           phoneNumber,
           text,
@@ -713,10 +702,7 @@ export default function App() {
     try {
       const res = await fetch('/api/team/invite', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({ email, role })
       });
       const data = await res.json();
@@ -734,10 +720,7 @@ export default function App() {
     try {
       const res = await fetch('/api/billing/upgrade', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({ plan })
       });
       const data = await res.json();
@@ -755,7 +738,7 @@ export default function App() {
     try {
       await fetch(`/api/notifications/${id}/read`, {
         method: 'PATCH',
-        headers: { 'x-tenant-id': currentTenant.id }
+        headers: authHeaders(currentTenant.id)
       });
       setNotifications(prev =>
         prev.map(n => (n.id === id ? { ...n, isRead: true } : n))
@@ -787,10 +770,7 @@ export default function App() {
     try {
       await fetch(`/api/tenants/${currentTenant.id}`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': currentTenant.id
-        },
+        headers: authHeaders(currentTenant.id),
         body: JSON.stringify({ name: updated.name, businessType: updated.businessType })
       });
     } catch (err) {
@@ -799,7 +779,7 @@ export default function App() {
     return true;
   };
 
-  if (isLoading || !currentTenant) {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white">
         <div className="flex items-center space-x-3 text-emerald-400">
@@ -810,12 +790,14 @@ export default function App() {
     );
   }
 
-  // If user navigated to public landing page
-  if (currentView === 'landing') {
+  if (!authUser || !currentTenant || currentView === 'landing' || currentView === 'auth') {
+    if (currentView === 'auth') {
+      return <AuthView onAuth={applyAuth} onBack={() => setCurrentView('landing')} />;
+    }
     return (
       <LandingPage
-        onEnterDashboard={() => setCurrentView('dashboard')}
-        onOpenSimulator={() => setCurrentView('simulator')}
+        onEnterDashboard={() => setCurrentView('auth')}
+        onOpenSimulator={() => setCurrentView(authUser && currentTenant ? 'simulator' : 'auth')}
       />
     );
   }
@@ -846,6 +828,8 @@ export default function App() {
         connectionStatus="CONNECTED"
         onNavigate={setCurrentView}
         currentView={currentView}
+        userEmail={authUser.email}
+        onLogout={handleLogout}
       />
 
       {/* Main Body with Sidebar + View Content */}

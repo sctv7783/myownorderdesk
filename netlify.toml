@@ -20,6 +20,60 @@
 [functions."products-import"]
   timeout = 26
 
+[[redirects]]
+  from = "/api/auth/*"
+  to = "/.netlify/functions/auth"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/auth"
+  to = "/.netlify/functions/auth"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/tenants"
+  to = "/.netlify/functions/tenants"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/tenants/"
+  to = "/.netlify/functions/tenants"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/tenants/*"
+  to = "/.netlify/functions/tenants"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/products/import-from-url"
+  to = "/.netlify/functions/products-import"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/products"
+  to = "/.netlify/functions/products"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/products/"
+  to = "/.netlify/functions/products"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/products/*"
+  to = "/.netlify/functions/products"
+  status = 200
+  force = true
+
 # Meta webhook must be served by a Netlify function (plain-text challenge).
 # This must stay above the /api/* Cloud Run proxy, or Facebook gets the SPA HTML.
 [[redirects]]
@@ -103,18 +157,6 @@
 [[redirects]]
   from = "/api/conversations/*"
   to = "/.netlify/functions/inbox"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/api/tenants/*"
-  to = "/.netlify/functions/store-profile"
-  status = 200
-  force = true
-
-[[redirects]]
-  from = "/api/products/import-from-url"
-  to = "/.netlify/functions/products-import"
   status = 200
   force = true
 

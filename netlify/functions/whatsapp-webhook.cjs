@@ -12,7 +12,9 @@ const VERIFY_TOKENS = new Set(
 const { loadConfig, loadConfigByPhone } = require('../lib/whatsapp-store.cjs');
 const { markMessageAsRead, sendWhatsAppText } = require('../lib/meta-graph.cjs');
 const { generateAgentReply } = require('../lib/groq-agent.cjs');
-const { appendMessage } = require('../lib/inbox-store.cjs');
+const { appendMessage } = require('../lib/conversations.cjs');
+const { getBusiness, findBusinessIdByPhone } = require('../lib/business.cjs');
+const { isUuid } = require('../lib/supabase-rest.cjs');
 
 function firstValue(value) {
   if (Array.isArray(value)) return value[0];
@@ -71,17 +73,24 @@ async function resolveCreds(phoneNumberId) {
   const byPhone = await loadConfigByPhone(phoneNumberId);
   if (byPhone?.accessToken) return byPhone;
 
+  const mappedTenantId = await findBusinessIdByPhone(phoneNumberId);
+  if (mappedTenantId) {
+    const stored = await loadConfig(mappedTenantId);
+    if (stored?.accessToken) return stored;
+  }
+
   const envToken = process.env.META_ACCESS_TOKEN || '';
   if (envToken) {
     return {
+      tenantId: mappedTenantId || '',
       phoneNumberId: phoneNumberId || process.env.META_PHONE_NUMBER_ID || '',
       accessToken: envToken,
-      verifiedName: process.env.META_VERIFIED_NAME || 'WhatsApp Business',
+      verifiedName: process.env.META_VERIFIED_NAME || '',
       agentGreeting: process.env.AGENT_GREETING || ''
     };
   }
 
-  return await loadConfig(process.env.DEFAULT_TENANT_ID || 'tenant_khyber_001');
+  return mappedTenantId ? await loadConfig(mappedTenantId) : null;
 }
 
 async function handleIncoming(payload) {
@@ -98,9 +107,18 @@ async function handleIncoming(payload) {
       if (!messages.length) continue;
 
       const creds = await resolveCreds(phoneNumberId);
-      const token = creds?.accessToken;
-      const phoneId = creds?.phoneNumberId || phoneNumberId;
-      const tenantId = creds?.tenantId || process.env.DEFAULT_TENANT_ID || 'tenant_khyber_001';
+      const tenantId =
+        (creds?.tenantId && isUuid(creds.tenantId) && creds.tenantId) ||
+        (await findBusinessIdByPhone(phoneNumberId)) ||
+        (await findBusinessIdByPhone(creds?.phoneNumberId));
+      if (!tenantId) {
+        console.warn('[Webhook] No store mapped for WhatsApp phone', phoneNumberId);
+        continue;
+      }
+      const stored = (await loadConfig(tenantId)) || creds;
+      const token = stored?.accessToken || creds?.accessToken;
+      const phoneId = stored?.phoneNumberId || creds?.phoneNumberId || phoneNumberId;
+      const store = await getBusiness(tenantId);
       if (!token || !phoneId) {
         console.warn('[Webhook] No Meta token for phone', phoneNumberId);
         continue;
@@ -136,7 +154,7 @@ async function handleIncoming(payload) {
           tenantId,
           customerName: contactName,
           customerPhone: senderPhone,
-          businessName: creds?.verifiedName || creds?.businessName,
+          businessName: store?.name || stored?.verifiedName || stored?.businessName,
           conversationId: savedIn?.conversation?.id
         });
 
