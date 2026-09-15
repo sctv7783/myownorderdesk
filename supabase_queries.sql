@@ -254,6 +254,19 @@ CREATE TABLE IF NOT EXISTS whatsapp_conversations (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS order_drafts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,
+  conversation_id UUID,
+  customer_phone TEXT,
+  awaiting TEXT,
+  state JSONB DEFAULT '{}'::JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_order_drafts_business ON order_drafts(business_id);
+CREATE INDEX IF NOT EXISTS idx_order_drafts_phone ON order_drafts(customer_phone);
+
 CREATE TABLE IF NOT EXISTS whatsapp_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   business_id UUID REFERENCES businesses(id) ON DELETE CASCADE,

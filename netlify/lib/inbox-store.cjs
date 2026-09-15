@@ -34,9 +34,12 @@ async function saveInbox(tenantId, state) {
 function upsertConversation(state, data) {
   const now = new Date().toISOString();
   const phone = String(data.customerPhone || '').replace(/\s/g, '');
-  let conv = state.conversations.find(
-    (c) => c.id === data.conversationId || c.customerPhone.replace(/\s/g, '') === phone
-  );
+  let conv = state.conversations.find((c) => {
+    if (data.conversationId && c.id === data.conversationId) return true;
+    const existingPhone = String(c.customerPhone || '').replace(/\D/g, '');
+    const nextPhone = String(data.customerPhone || '').replace(/\D/g, '');
+    return existingPhone && nextPhone && existingPhone === nextPhone;
+  });
   if (!conv) {
     conv = {
       id: data.conversationId || `conv_${Date.now()}`,

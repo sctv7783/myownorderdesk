@@ -68,21 +68,31 @@ async function ensureBusiness(hint) {
 
 async function findBusinessIdByPhone(phoneNumberId) {
   if (!phoneNumberId || !getSupabaseConfig()) return null;
-  const { rows } = await sbSelect('whatsapp_configs', {
+  const wanted = String(phoneNumberId).trim();
+  const exact = await sbSelect('whatsapp_configs', {
     select: 'business_id,phone_number_id',
-    phone_number_id: `eq.${phoneNumberId}`
+    phone_number_id: `eq.${wanted}`
   });
-  return rows[0]?.business_id || null;
+  if (exact.rows[0]?.business_id) return exact.rows[0].business_id;
+  const all = await sbSelect('whatsapp_configs', {
+    select: 'business_id,phone_number_id'
+  });
+  const match = (all.rows || []).find((row) => String(row.phone_number_id || '').trim() === wanted);
+  return match?.business_id || null;
 }
 
 async function resolveBusinessId(event, body) {
-  const hint = tenantFromEvent(event, body);
+  const q = event?.queryStringParameters || {};
+  const hint =
+    tenantFromEvent(event, body) ||
+    String(q.tenantId || q.tenant_id || q.businessId || '').trim();
   if (hint && isUuid(hint)) {
+    if (!getSupabaseConfig()) return hint;
     const existing = await sbSelect('businesses', { select: 'id', id: `eq.${hint}` });
     if (existing.rows[0]) return existing.rows[0].id;
     return hint;
   }
-  return null;
+  return hint || null;
 }
 
 async function getBusiness(businessId) {

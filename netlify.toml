@@ -179,6 +179,12 @@
   force = true
 
 [[redirects]]
+  from = "/api/conversations/"
+  to = "/.netlify/functions/inbox"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/api/conversations/*"
   to = "/.netlify/functions/inbox"
   status = 200

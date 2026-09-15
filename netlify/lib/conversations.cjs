@@ -78,16 +78,62 @@ async function insertVariants(table, variants) {
   return { ok: false, row: null };
 }
 
+async function conversationsFromMessages(tenantId) {
+  const { ok, rows } = await sbSelect('whatsapp_messages', {
+    select: '*',
+    business_id: `eq.${tenantId}`,
+    order: 'created_at.desc',
+    limit: '200'
+  });
+  if (!ok || !rows.length) return [];
+  const byConv = new Map();
+  for (const row of rows) {
+    const id = row.conversation_id;
+    if (!id || byConv.has(id)) continue;
+    byConv.set(id, {
+      id,
+      tenantId,
+      customerId: `cust_${String(id).slice(-8)}`,
+      customerPhone: '',
+      customerName: 'Customer',
+      phoneNumberId: '',
+      status: 'AI_ACTIVE',
+      lastMessageText: row.text || row.content || '',
+      lastMessageAt: row.created_at,
+      unreadCount: 0,
+      createdAt: row.created_at,
+      updatedAt: row.created_at
+    });
+  }
+  const convRows = await sbSelect('whatsapp_conversations', {
+    select: '*',
+    business_id: `eq.${tenantId}`
+  });
+  return [...byConv.values()].map((conv) => {
+    const row = (convRows.rows || []).find((item) => item.id === conv.id);
+    return row ? mapConversation(row, tenantId) : conv;
+  });
+}
+
 async function listConversations(tenantId) {
   const local = await blob.listConversations(tenantId);
   if (!getSupabaseConfig() || !isUuid(tenantId)) return local;
-  const { ok, rows } = await sbSelect('whatsapp_conversations', {
+  let remoteRes = await sbSelect('whatsapp_conversations', {
     select: '*',
     business_id: `eq.${tenantId}`,
     order: 'last_message_at.desc'
   });
-  if (!ok) return local;
-  return mergeConversations(rows.map((row) => mapConversation(row, tenantId)), local);
+  if (!remoteRes.ok) {
+    remoteRes = await sbSelect('whatsapp_conversations', {
+      select: '*',
+      business_id: `eq.${tenantId}`
+    });
+  }
+  let remote = remoteRes.ok ? remoteRes.rows.map((row) => mapConversation(row, tenantId)) : [];
+  if (!remote.length) {
+    remote = await conversationsFromMessages(tenantId);
+  }
+  return mergeConversations(remote, local);
 }
 
 async function listMessages(tenantId, conversationId) {

@@ -49,15 +49,47 @@ async function getBlobStore() {
   }
 }
 
+const { getSupabaseConfig, isUuid, sbSelect } = require('./supabase-rest.cjs');
+
+function mapDbConfig(row) {
+  if (!row) return null;
+  return {
+    tenantId: row.business_id,
+    accountId: `waba_acc_${row.business_id}`,
+    phoneRecordId: `phone_rec_${row.business_id}`,
+    wabaId: row.waba_id,
+    phoneNumberId: row.phone_number_id,
+    displayPhoneNumber: row.display_phone_number,
+    verifiedName: row.verified_name,
+    businessName: row.verified_name || row.business_name,
+    accessToken: row.access_token,
+    qualityRating: row.quality_rating || 'GREEN',
+    messagingLimitTier: row.messaging_limit_tier || 'TIER_1K',
+    status: 'CONNECTED',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastVerifiedAt: row.updated_at
+  };
+}
+
 async function loadConfig(tenantId) {
   const store = await getBlobStore();
-  if (!store) return null;
-  try {
-    return (await store.get(tenantKey(tenantId), { type: 'json' })) || null;
-  } catch (err) {
-    console.warn('[WhatsApp Store] Load failed:', err?.message || err);
-    return null;
+  if (store && tenantId) {
+    try {
+      const blob = await store.get(tenantKey(tenantId), { type: 'json' });
+      if (blob?.accessToken) return blob;
+    } catch (err) {
+      console.warn('[WhatsApp Store] Load failed:', err?.message || err);
+    }
   }
+  if (tenantId && isUuid(tenantId) && getSupabaseConfig()) {
+    const { rows } = await sbSelect('whatsapp_configs', {
+      select: '*',
+      business_id: `eq.${tenantId}`
+    });
+    return mapDbConfig(rows[0]);
+  }
+  return null;
 }
 
 async function saveConfig(tenantId, data) {
@@ -93,14 +125,22 @@ async function saveConfig(tenantId, data) {
 
 async function loadConfigByPhone(phoneNumberId) {
   if (!phoneNumberId) return null;
+  const wanted = String(phoneNumberId).trim();
   const store = await getBlobStore();
-  if (!store) return null;
-  try {
-    return (await store.get(`phone:${phoneNumberId}`, { type: 'json' })) || null;
-  } catch (err) {
-    console.warn('[WhatsApp Store] Phone lookup failed:', err?.message || err);
-    return null;
+  if (store) {
+    try {
+      const blob = await store.get(`phone:${wanted}`, { type: 'json' });
+      if (blob?.accessToken) return blob;
+    } catch (err) {
+      console.warn('[WhatsApp Store] Phone lookup failed:', err?.message || err);
+    }
   }
+  if (getSupabaseConfig()) {
+    const { rows } = await sbSelect('whatsapp_configs', { select: '*' });
+    const match = (rows || []).find((row) => String(row.phone_number_id || '').trim() === wanted);
+    return mapDbConfig(match);
+  }
+  return null;
 }
 
 function configResponse(record, extras) {

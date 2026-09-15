@@ -3,38 +3,30 @@ const { loadAiSettings, loadStoreProfile } = require('./ai-settings-store.cjs');
 const { listConversations, listMessages, setConversationStatus } = require('./conversations.cjs');
 const { listProducts, catalogText } = require('./products-store.cjs');
 const { getBusiness } = require('./business.cjs');
-const { applyCustomerTurn, parseGroqAction, loadCart } = require('./order-engine.cjs');
+const {
+  applyCustomerTurn,
+  formatDraftForPrompt,
+  stripRepeatedGreeting,
+  searchProducts
+} = require('./order-engine.cjs');
 
 function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '');
 }
 
-function wantsProductList(text) {
-  const t = String(text || '').toLowerCase();
-  return /product|catalog|menu|list|items|saare|sari|saari|dikha|dikhao|dikh|all product|poori list|pura list/.test(
-    t
-  );
-}
-
 function wantsStoreName(text) {
   const t = String(text || '').toLowerCase();
-  return /store ka naam|store ka name|tumhara naam|tumhara name|your name|business name|shop ka naam/.test(
-    t
-  );
+  return /store ka naam|store ka name|tumhara naam|your name|business name|shop ka naam/.test(t);
 }
 
-function formatCatalogReply(businessName, products) {
-  const active = (products || []).filter((p) => p.isActive !== false);
-  if (!active.length) {
-    return `${businessName} ki catalog abhi empty hai. Dashboard se products add/import karein, phir main yahan list bhej doonga.`;
-  }
-  const lines = active.slice(0, 20).map((p, i) => {
-    const price = p.salePrice || p.price;
-    return `${i + 1}) ${p.name} — Rs. ${Number(price).toLocaleString()} (stock ${p.stockQuantity})`;
-  });
-  const extra = active.length > 20 ? `\n+${active.length - 20} more items.` : '';
-  return `${businessName} ke available products:\n${lines.join('\n')}${extra}\n\nOrder ke liye number ya product naam + quantity likhein, phir delivery address.`;
-}
+const STATE_RULES = `You are a WhatsApp sales representative for one store, not a generic chatbot.
+Follow the ORDER DRAFT STATE. It is the source of truth. Do not restart the chat. Do not dump the catalog.
+GREETING: If state.greeted is true, NEVER say Assalam, Wa Alaikum, or Welcome.
+If awaiting is QUANTITY, a number means quantity for the selected product.
+If awaiting is ADDRESS, treat a location-like message as the address.
+If awaiting is CONFIRMATION, do not create an order yourself — the backend does that.
+Ask only for the missing field. Replies: 1-5 short Roman Urdu/English lines matching the customer.
+Never invent products, prices, stock, or order numbers. Use only the catalog snippet.`;
 
 function buildSystemPrompt({
   businessName,
@@ -44,68 +36,43 @@ function buildSystemPrompt({
   customerPhone,
   historyText,
   catalog,
-  isFirstMessage,
-  cartText
+  draftText,
+  greeted
 }) {
   const faqs = (knowledge || [])
     .filter((k) => k && k.isActive !== false)
-    .slice(0, 20)
+    .slice(0, 12)
     .map((k) => `- Q: ${k.question}\n  A: ${k.answer}`)
     .join('\n');
-
-  const tone = settings?.tone || 'friendly';
-  const greeting = settings?.greetingMessage || `Assalam-o-Alaikum! ${businessName} mein khush amdeed.`;
   const extra = settings?.customInstructions || '';
 
-  return `You are the official WhatsApp sales assistant AND order-taker for "${businessName}".
-Your name is "${businessName} Order Assistant". Never invent a human name. Never write [Name] or {name}.
-Customer: ${customerName && !/\[name\]/i.test(customerName) ? customerName : 'Customer'} (${customerPhone || 'unknown'}).
+  return `${STATE_RULES}
 
-You have FULL permission to:
-- talk naturally about products, prices, stock, delivery, payment (COD default)
-- recommend items from the live catalog
-- collect quantity, name, phone, and full delivery address
-- recap the order and ask for HAAN/confirm
-The backend places the real order after confirm. Do not pretend an order is confirmed unless the draft below already has items + address and the customer clearly said haan/confirm.
+Store: "${businessName}". Your name is "${businessName} Order Assistant". Never use [Name].
+Customer: ${customerName} (${customerPhone || 'unknown'}).
+Greeted already: ${greeted ? 'YES — do not greet' : 'NO — a short Wa Alaikum Assalam is allowed only if they greeted'}.
 
-STRICT RULES:
-- Reply in the customer's language (Urdu / Roman Urdu / English). Tone: ${tone}.
-- Keep replies 1-10 short WhatsApp lines. Be a helpful closer, not a robot.
-- ${isFirstMessage ? `First message only, you may greet like: ${greeting}` : 'Do NOT greet again. Answer the latest message directly.'}
-- Quote ONLY catalog names and prices. Never invent products.
-- If they ask for list/menu/products, list real catalog items.
-- If something is out of stock, say so and offer alternatives from the catalog.
-- Missing quantity? Ask. Missing address (house, street, area, city)? Ask. Then recap and wait for confirm.
-- Complaints / "human" / manager: be empathetic; handoff is handled separately.
-
-TRAINING:
-${extra || 'Be polite. Confirm quantity and address before finalizing. COD unless told otherwise.'}
+Training:
+${extra}
 
 FAQs:
 ${faqs || '(none)'}
 
-LIVE PRODUCT CATALOG:
-${catalog || '(empty — do not invent products)'}
+Relevant catalog:
+${catalog || '(empty)'}
 
-CURRENT DRAFT CART:
-${cartText || '(empty)'}
+ORDER DRAFT STATE:
+${draftText}
 
 Recent chat:
-${historyText || '(new chat)'}
-
-After your customer-facing reply, ALWAYS append this exact block (not shown as chat if you keep it last):
-<<<ORDER
-{"action":"none","items":[],"address":"","confirmed":false}
-ORDER>>>
-Use action "add_items" when they chose products, include items [{name,qty}]. Put address string when they gave one. Set confirmed true only if they clearly confirmed.`;
+${historyText || '(new chat)'}`;
 }
 
 async function generateAgentReply(incomingText, options = {}) {
   const tenantId = options.tenantId;
   const text = String(incomingText || '').trim();
-  const customerName = options.customerName && !/\[name\]/i.test(options.customerName)
-    ? options.customerName
-    : 'Customer';
+  const customerName =
+    options.customerName && !/\[name\]/i.test(options.customerName) ? options.customerName : 'Customer';
   const customerPhone = options.customerPhone || '';
 
   const [aiRecord, profile, business, products] = await Promise.all([
@@ -124,6 +91,7 @@ async function generateAgentReply(incomingText, options = {}) {
     (fromMeta && !/whatsapp business/i.test(fromMeta) ? fromMeta : '') ||
     options.verifiedName ||
     'our store';
+  const deliveryFee = Number(profile?.deliveryFee || business?.deliveryFee || 0);
 
   if (settings?.isEnabled === false) {
     return { reply: null, skipped: true, reason: 'disabled', settings };
@@ -137,8 +105,7 @@ async function generateAgentReply(incomingText, options = {}) {
       await setConversationStatus(tenantId, options.conversationId, 'HUMAN_ACTIVE');
     }
     return {
-      reply:
-        'Maine aapki conversation human staff ko transfer kar di hai. A staff member will be with you shortly.',
+      reply: 'Maine aapki baat human staff ko de di hai. Staff jaldi reply karega.',
       skipped: false,
       handoff: true,
       settings,
@@ -146,65 +113,46 @@ async function generateAgentReply(incomingText, options = {}) {
     };
   }
 
-  const engineFirst = await applyCustomerTurn({
+  if (wantsStoreName(text)) {
+    return {
+      reply: `Store: ${businessName}. Main yahin se order le sakta hoon.`,
+      skipped: false,
+      settings
+    };
+  }
+
+  const engine = await applyCustomerTurn({
     tenantId,
     customerPhone,
     customerName,
+    conversationId: options.conversationId,
     text: text.startsWith('[') ? '' : text,
     products,
     businessName,
+    deliveryFee,
     persistOrder: true
   });
 
-  if (engineFirst.next === 'done' && engineFirst.reply) {
+  if (engine.reply && engine.skipGroq) {
+    const reply = engine.greetedBefore ? stripRepeatedGreeting(engine.reply) : engine.reply;
     return {
-      reply: engineFirst.reply,
+      reply,
       skipped: false,
       settings,
-      order: engineFirst.order,
-      model: GROQ_MODEL
-    };
-  }
-  if (engineFirst.next === 'ask_confirm' && engineFirst.reply) {
-    return {
-      reply: engineFirst.reply,
-      skipped: false,
-      settings,
-      orderDraft: true,
+      order: engine.order || null,
       model: GROQ_MODEL
     };
   }
 
   if (!text || text.startsWith('[')) {
     return {
-      reply: 'Photo/media receive ho gayi. Product ka naam, quantity aur delivery address text mein likhein.',
+      reply: 'Photo aa gayi. Product ka naam text mein likhein.',
       skipped: false,
       settings
     };
-  }
-
-  if (wantsStoreName(text)) {
-    return {
-      reply: `Mera naam ${businessName} ka WhatsApp order assistant hai.\nStore: ${businessName}. Main products recommend kar sakta hoon aur order confirm kar sakta hoon.`,
-      skipped: false,
-      settings
-    };
-  }
-
-  if (wantsProductList(text) && engineFirst.next === 'ask_product') {
-    return {
-      reply: formatCatalogReply(businessName, products),
-      skipped: false,
-      settings
-    };
-  }
-
-  if (engineFirst.next === 'ask_address' && engineFirst.reply) {
-    return { reply: engineFirst.reply, skipped: false, settings };
   }
 
   let historyText = '';
-  let isFirstMessage = true;
   try {
     const convs = await listConversations(tenantId);
     const phoneDigits = normalizePhone(customerPhone);
@@ -216,11 +164,10 @@ async function generateAgentReply(incomingText, options = {}) {
         return { reply: null, skipped: true, reason: 'human_active', settings };
       }
       const msgs = await listMessages(tenantId, conv.id);
-      isFirstMessage = msgs.length <= 1;
       historyText = msgs
-        .slice(-16)
+        .slice(-10)
         .filter((m, i, arr) => !(i === arr.length - 1 && m.sender === 'CUSTOMER' && m.text === text))
-        .slice(-12)
+        .slice(-8)
         .map((m) => `${m.sender}: ${m.text}`)
         .join('\n');
     }
@@ -228,22 +175,15 @@ async function generateAgentReply(incomingText, options = {}) {
     console.warn('[Groq] history load failed', err?.message || err);
   }
 
+  const relevant = searchProducts(products, text).slice(0, 8).map((row) => row.product);
+  const catalog = catalogText(relevant.length ? relevant : []);
+  const draft = engine.draft || engine.cart;
+  const greeted = Boolean(draft?.greeted);
+  const fallback = engine.reply || 'Ji, batayein kaunsa product chahiye?';
+
   const apiKey = process.env.GROQ_API_KEY;
-  const catalog = catalogText(products);
-  const cart = engineFirst.cart || (await loadCart(tenantId, customerPhone));
-  const cartText = cart?.items?.length
-    ? cart.items.map((i) => `${i.quantity}x ${i.productName} @ Rs ${i.unitPrice}`).join('\n') +
-      `\nAddress: ${cart.address || '(missing)'}`
-    : '(empty)';
-
-  const fallbackTalk = () => {
-    if (engineFirst.reply) return engineFirst.reply;
-    if (products.length) return formatCatalogReply(businessName, products);
-    return `${businessName}: product naam, quantity aur complete delivery address bhejein — main order confirm kar doonga.`;
-  };
-
   if (!apiKey) {
-    return { reply: fallbackTalk(), skipped: false, groqConfigured: false, settings };
+    return { reply: fallback, skipped: false, groqConfigured: false, settings };
   }
 
   try {
@@ -255,8 +195,8 @@ async function generateAgentReply(incomingText, options = {}) {
       },
       body: JSON.stringify({
         model: GROQ_MODEL,
-        temperature: 0.35,
-        max_tokens: 900,
+        temperature: 0.15,
+        max_tokens: 220,
         messages: [
           {
             role: 'system',
@@ -268,8 +208,8 @@ async function generateAgentReply(incomingText, options = {}) {
               customerPhone,
               historyText,
               catalog,
-              isFirstMessage,
-              cartText
+              draftText: formatDraftForPrompt(draft),
+              greeted
             })
           },
           { role: 'user', content: text }
@@ -279,27 +219,12 @@ async function generateAgentReply(incomingText, options = {}) {
     const groqData = await groqRes.json().catch(() => ({}));
     if (!groqRes.ok) {
       console.error('[Groq]', groqData.error || groqData);
-      return { reply: fallbackTalk(), skipped: false, settings, error: groqData.error?.message };
+      return { reply: fallback, skipped: false, settings };
     }
-    const rawReply = groqData.choices?.[0]?.message?.content?.trim() || '';
-    const parsed = parseGroqAction(rawReply);
-    let reply = (parsed.clean || '').replace(/\[Name\]/gi, customerName === 'Customer' ? businessName : customerName);
-
-    const engineSecond = await applyCustomerTurn({
-      tenantId,
-      customerPhone,
-      customerName,
-      text: '',
-      products,
-      businessName,
-      groqAction: parsed.action,
-      persistOrder: true
-    });
-    if (engineSecond.next === 'done' && engineSecond.reply) {
-      return { reply: engineSecond.reply, skipped: false, settings, order: engineSecond.order, model: GROQ_MODEL };
-    }
-    if (engineSecond.next === 'ask_confirm' && engineSecond.reply) {
-      return { reply: engineSecond.reply, skipped: false, settings, orderDraft: true, model: GROQ_MODEL };
+    let reply = groqData.choices?.[0]?.message?.content?.trim() || '';
+    reply = stripRepeatedGreeting(reply);
+    if (greeted) {
+      reply = stripRepeatedGreeting(reply.replace(/assalam[^\n]*/gi, '').trim());
     }
     if (reply) {
       return { reply, skipped: false, settings, model: GROQ_MODEL, groqConfigured: true };
@@ -308,7 +233,7 @@ async function generateAgentReply(incomingText, options = {}) {
     console.error('[Groq network]', err);
   }
 
-  return { reply: fallbackTalk(), skipped: false, settings };
+  return { reply: fallback, skipped: false, settings };
 }
 
 module.exports = { GROQ_MODEL, generateAgentReply, buildSystemPrompt };

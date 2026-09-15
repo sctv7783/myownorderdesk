@@ -3,7 +3,7 @@ const { resolveBusinessId } = require('../lib/business.cjs');
 const { loadConfig } = require('../lib/whatsapp-store.cjs');
 const { sendWhatsAppText } = require('../lib/meta-graph.cjs');
 const { listProducts } = require('../lib/products-store.cjs');
-const { applyCustomerTurn, clearCart } = require('../lib/order-engine.cjs');
+const { applyCustomerTurn, clearDraft } = require('../lib/order-engine.cjs');
 const { getBusiness } = require('../lib/business.cjs');
 
 function json(statusCode, payload) {
@@ -37,7 +37,7 @@ async function processStoredChats(tenantId) {
     if (!messages.some((msg) => msg.sender === 'CUSTOMER' && orderish.test(String(msg.text || '')))) {
       continue;
     }
-    await clearCart(tenantId, conv.customerPhone);
+    await clearDraft(tenantId, { customerPhone: conv.customerPhone, conversationId: conv.id });
     for (const msg of messages) {
       if (msg.sender !== 'CUSTOMER' || !msg.text || String(msg.text).startsWith('[')) continue;
       const result = await applyCustomerTurn({
@@ -47,6 +47,7 @@ async function processStoredChats(tenantId) {
         text: msg.text,
         products,
         businessName: business?.name || '',
+        conversationId: conv.id,
         persistOrder: true
       });
       if (result.order) created.push(result.order);
@@ -64,8 +65,11 @@ exports.handler = async function handler(event) {
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
-  const tenantId = await resolveBusinessId(event, body);
-  if (!tenantId) return json(401, { error: 'Store session required', conversations: [] });
+  const tenantId =
+    (await resolveBusinessId(event, body)) ||
+    event.queryStringParameters?.tenantId ||
+    event.queryStringParameters?.tenant_id;
+  if (!tenantId) return json(200, { conversations: [], messages: [], error: 'Store session required' });
 
   const path = event.path || '';
   const parts = path.split('/').filter(Boolean);

@@ -38,7 +38,7 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, gr
     {
       id: 'init_1',
       sender: 'AI',
-      text: `Assalam-o-Alaikum! Welcome to ${tenant.name} official WhatsApp. Main aapka AI assistant hoon. Aaj aap kya order karna chahenge?`,
+      text: `Wa Alaikum Assalam! Ji, batayein ${tenant.name} se kya lena hai?`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     }
   ]);
@@ -46,11 +46,11 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, gr
   const [showLogs, setShowLogs] = useState(false);
 
   const presets = [
-    { label: 'Menu Query', text: 'Assalam o Alaikum, aaj ka menu aur prices bata den?' },
-    { label: 'Place Order (Urdu)', text: 'Bhai 2 zinger burger chahiye delivery kitni hai?' },
-    { label: 'Confirm Order', text: 'Haan bilkul confirm kar do, address DHA Phase 5 Lahore hai.' },
-    { label: 'Stock Availability', text: 'Kya Smoky Beef Burger stock me available hai?' },
-    { label: 'Human Handoff', text: 'Mujhe human staff / manager se baat karni hai, complaint hai.' }
+    { label: 'Salam', text: 'Assalamualaikum' },
+    { label: 'Product', text: 'M10 earbuds chahiye' },
+    { label: 'Quantity', text: '2 chahiyein' },
+    { label: 'Address', text: 'Kashmir Block, Allama Iqbal Town, Lahore' },
+    { label: 'Confirm', text: 'haan' }
   ];
 
   const handleSendMessage = async (msgToSend?: string) => {
@@ -123,7 +123,7 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, gr
       {
         id: `init_${Date.now()}`,
         sender: 'AI',
-        text: `Assalam-o-Alaikum! Welcome to ${tenant.name}. How can I help you?`,
+        text: `Wa Alaikum Assalam! Ji, batayein.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       }
     ]);

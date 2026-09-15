@@ -46,10 +46,9 @@ function defaultAgentSettings(tenantId: string): AgentSettings {
     model: 'openai/gpt-oss-20b',
     primaryLanguage: 'auto',
     tone: 'friendly',
-    greetingMessage:
-      'Assalam-o-Alaikum! Welcome to our official WhatsApp store. Main aapki kya madad kar sakta hoon?',
+    greetingMessage: 'Wa Alaikum Assalam! Ji, batayein.',
     customInstructions:
-      'You are a full WhatsApp sales assistant and order-taker. Recommend catalog products, collect quantity and a complete delivery address, recap the order, then confirm only after the customer says haan/yes.',
+      'You are a stateful WhatsApp sales representative. Greet at most once. Never restart or dump the catalog. Ask only for missing product, quantity, or address. Confirm only after a summary. Never invent products or prices.',
     orderConfirmationRequired: true,
     handoffKeywords: ['human', 'agent', 'staff', 'complaint', 'manager', 'madad'],
     enableStockCheck: true,
@@ -275,7 +274,7 @@ export default function App() {
         analyticsRes
       ] = await Promise.all([
         safeFetch('/api/orders'),
-        safeFetch('/api/conversations'),
+        safeFetch(`/api/conversations?tenantId=${encodeURIComponent(tenantId)}`),
         safeFetch('/api/products'),
         safeFetch('/api/customers'),
         safeFetch('/api/notifications'),
@@ -395,7 +394,7 @@ export default function App() {
 
     const pollInbox = async () => {
       try {
-        const res = await fetch('/api/conversations', {
+        const res = await fetch(`/api/conversations?tenantId=${encodeURIComponent(currentTenant.id)}`, {
           headers: authHeaders(currentTenant.id)
         });
         const raw = await res.text();
@@ -463,7 +462,9 @@ export default function App() {
 
     async function loadMessages() {
       try {
-        const res = await fetch(`/api/conversations/${selectedConvId}/messages`, {
+        const res = await fetch(
+          `/api/conversations/${selectedConvId}/messages?tenantId=${encodeURIComponent(currentTenant!.id)}`,
+          {
           headers: authHeaders(currentTenant!.id)
         });
         const raw = await res.text();
