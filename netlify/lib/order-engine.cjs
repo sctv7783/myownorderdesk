@@ -43,30 +43,50 @@ function normalizeDraft(raw) {
   return { ...emptyDraft(), ...(raw || {}) };
 }
 
+function draftScore(draft) {
+  if (!draft) return -1;
+  return (
+    (draft.items?.length || 0) * 10 +
+    (draft.selectedProductId ? 3 : 0) +
+    (draft.deliveryAddress ? 4 : 0) +
+    (draft.greeted ? 1 : 0) +
+    (draft.summaryPresented ? 2 : 0)
+  );
+}
+
+function pickRicherDraft(...drafts) {
+  return drafts.filter(Boolean).sort((a, b) => draftScore(b) - draftScore(a))[0] || emptyDraft();
+}
+
 async function loadDraft(tenantId, { customerPhone, conversationId } = {}) {
+  const found = [];
   const store = await getDraftStore();
   if (store) {
     try {
       if (conversationId) {
         const byConv = await store.get(convKey(tenantId, conversationId), { type: 'json' });
-        if (byConv) return normalizeDraft(byConv);
+        if (byConv) found.push(normalizeDraft(byConv));
       }
       const byPhone = await store.get(phoneKey(tenantId, customerPhone), { type: 'json' });
-      if (byPhone) return normalizeDraft(byPhone);
+      if (byPhone) found.push(normalizeDraft(byPhone));
     } catch {
       /* continue */
     }
   }
   if (getSupabaseConfig() && isUuid(tenantId)) {
+    const digits = String(customerPhone || '').replace(/\D/g, '');
     const { rows } = await sbSelect('order_drafts', {
       select: '*',
-      business_id: `eq.${tenantId}`,
-      customer_phone: `eq.${String(customerPhone || '')}`
+      business_id: `eq.${tenantId}`
     });
-    if (rows[0]?.state) return normalizeDraft(rows[0].state);
-    if (rows[0] && rows[0].items) return normalizeDraft(rows[0]);
+    const match = (rows || []).find(
+      (row) =>
+        row.conversation_id === conversationId ||
+        String(row.customer_phone || '').replace(/\D/g, '') === digits
+    );
+    if (match?.state) found.push(normalizeDraft(match.state));
   }
-  return emptyDraft();
+  return pickRicherDraft(...found);
 }
 
 async function saveDraft(tenantId, draft, { customerPhone, conversationId } = {}) {
@@ -380,12 +400,26 @@ async function applyCustomerTurn({
   products,
   businessName,
   deliveryFee = 0,
-  persistOrder = true
+  persistOrder = true,
+  history = []
 }) {
   const refs = { customerPhone, conversationId };
   let draft = await loadDraft(tenantId, refs);
-  const greetedBefore = Boolean(draft.greeted);
   const message = String(text || '').trim();
+  let historyForHydrate = Array.isArray(history) ? history : [];
+  if (message && historyForHydrate.length) {
+    const last = historyForHydrate[historyForHydrate.length - 1];
+    if (last?.sender === 'CUSTOMER' && String(last.text || '').trim() === message) {
+      historyForHydrate = historyForHydrate.slice(0, -1);
+    }
+  }
+  if (historyForHydrate.length) {
+    draft = hydrateDraftFromHistory(draft, products, historyForHydrate);
+  }
+  const greetedBefore =
+    Boolean(draft.greeted) ||
+    (Array.isArray(history) && history.some((m) => m.sender === 'CUSTOMER'));
+  if (greetedBefore) draft.greeted = true;
   const fee = Number(deliveryFee || 0);
 
   const done = (reply, extra = {}) => {
@@ -420,14 +454,25 @@ async function applyCustomerTurn({
   }
 
   if (isGreetingOnly(message)) {
+    if (draft.items.length || draft.selectedProductId) {
+      draft.greeted = true;
+      draft.awaiting = nextMissing(draft);
+      const hint =
+        draft.awaiting === 'QUANTITY'
+          ? 'Quantity kitni chahiye?'
+          : draft.awaiting === 'ADDRESS'
+            ? 'Delivery address bata dein.'
+            : draft.awaiting === 'CONFIRMATION'
+              ? 'Order confirm kar doon?'
+              : 'Ji, continue karein.';
+      return done(hint);
+    }
     const reply = maybeGreet(
       draft,
       message,
-      draft.greeted
-        ? 'Ji, batayein.'
-        : 'Ji, batayein aap kis product ke baare mein maloomat chahte hain?'
+      draft.greeted ? 'Ji, batayein.' : 'Ji, batayein aap kis product ke baare mein maloomat chahte hain?'
     );
-    draft.awaiting = draft.items.length ? nextMissing(draft) : 'PRODUCT';
+    draft.awaiting = 'PRODUCT';
     return done(reply);
   }
 
@@ -595,6 +640,37 @@ async function applyCustomerTurn({
   return done(null, { skipGroq: false });
 }
 
+function hydrateDraftFromHistory(draft, products, messages) {
+  let next = normalizeDraft(draft);
+  const customerMsgs = (messages || []).filter(
+    (m) => m.sender === 'CUSTOMER' && m.text && !String(m.text).startsWith('[')
+  );
+  if (!customerMsgs.length) return next;
+  next.greeted = true;
+  for (const msg of customerMsgs) {
+    const resolved = resolveProductMention(products, msg.text);
+    const qty = extractQuantity(msg.text);
+    if (resolved.matches.length === 1) {
+      if (qty) upsertItem(next, resolved.matches[0], qty);
+      else {
+        next.selectedProductId = resolved.matches[0].id;
+        next.selectedProductName = resolved.matches[0].name;
+      }
+    } else if (qty && next.selectedProductId) {
+      const product = (products || []).find((p) => p.id === next.selectedProductId);
+      if (product) upsertItem(next, product, qty);
+    }
+    const addr = extractAddress(msg.text, Boolean(next.items.length) || next.awaiting === 'ADDRESS');
+    if (addr) next.deliveryAddress = addr;
+  }
+  next = totals(next, next.deliveryFee || 0);
+  next.awaiting = nextMissing(next);
+  if (next.awaiting === 'CONFIRMATION' && next.items.length && next.deliveryAddress) {
+    next.summaryPresented = true;
+  }
+  return next;
+}
+
 function formatDraftForPrompt(draft) {
   if (!draft) return '(empty)';
   return JSON.stringify(
@@ -618,6 +694,7 @@ module.exports = {
   saveDraft,
   clearDraft,
   applyCustomerTurn,
+  hydrateDraftFromHistory,
   formatSummary,
   formatDraftForPrompt,
   searchProducts,

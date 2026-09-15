@@ -2,9 +2,6 @@ const { listConversations, listMessages, appendMessage, setConversationStatus } 
 const { resolveBusinessId } = require('../lib/business.cjs');
 const { loadConfig } = require('../lib/whatsapp-store.cjs');
 const { sendWhatsAppText } = require('../lib/meta-graph.cjs');
-const { listProducts } = require('../lib/products-store.cjs');
-const { applyCustomerTurn, clearDraft } = require('../lib/order-engine.cjs');
-const { getBusiness } = require('../lib/business.cjs');
 
 function json(statusCode, payload) {
   return {
@@ -24,40 +21,13 @@ function parseBody(event) {
   }
 }
 
-async function processStoredChats(tenantId) {
-  const [conversations, products, business] = await Promise.all([
-    listConversations(tenantId),
-    listProducts(tenantId),
-    getBusiness(tenantId)
-  ]);
-  const created = [];
-  for (const conv of conversations.slice(0, 25)) {
-    const messages = await listMessages(tenantId, conv.id);
-    const orderish = /order|chahiye|address|pata|confirm|haan|han |delivery|bhej|quantity|pcs|rs\.?|price/i;
-    if (!messages.some((msg) => msg.sender === 'CUSTOMER' && orderish.test(String(msg.text || '')))) {
-      continue;
-    }
-    await clearDraft(tenantId, { customerPhone: conv.customerPhone, conversationId: conv.id });
-    for (const msg of messages) {
-      if (msg.sender !== 'CUSTOMER' || !msg.text || String(msg.text).startsWith('[')) continue;
-      const result = await applyCustomerTurn({
-        tenantId,
-        customerPhone: conv.customerPhone,
-        customerName: conv.customerName,
-        text: msg.text,
-        products,
-        businessName: business?.name || '',
-        conversationId: conv.id,
-        persistOrder: true
-      });
-      if (result.order) created.push(result.order);
-    }
+async function resolvePhoneNumberId(tenantId) {
+  try {
+    const creds = await loadConfig(tenantId);
+    return creds?.phoneNumberId || '';
+  } catch {
+    return '';
   }
-  return {
-    conversations: conversations.length,
-    ordersCreated: created.length,
-    orders: created
-  };
 }
 
 exports.handler = async function handler(event) {
@@ -73,37 +43,44 @@ exports.handler = async function handler(event) {
 
   const path = event.path || '';
   const parts = path.split('/').filter(Boolean);
-  const convIdx = parts.lastIndexOf('conversations');
+  const convIdx = Math.max(parts.lastIndexOf('conversations'), parts.lastIndexOf('inbox'));
   const nextPart = convIdx >= 0 ? parts[convIdx + 1] : null;
   const convId = nextPart && nextPart !== 'messages' && nextPart !== 'sync' ? nextPart : null;
   const wantsMessages = path.includes('/messages');
   const wantsSync = path.includes('/sync') || nextPart === 'sync';
+  const phoneNumberId = await resolvePhoneNumberId(tenantId);
 
-  if (method === 'POST' && wantsSync) {
-    const processed = await processStoredChats(tenantId);
-    const conversations = await listConversations(tenantId);
-    return json(200, { success: true, ...processed, conversations });
+  if ((method === 'POST' || method === 'GET') && wantsSync) {
+    const conversations = await listConversations(tenantId, phoneNumberId);
+    return json(200, {
+      success: true,
+      count: conversations.length,
+      ordersCreated: 0,
+      orders: [],
+      conversations
+    });
   }
 
   if (method === 'GET' && wantsMessages && convId) {
-    const messages = await listMessages(tenantId, convId);
+    const messages = await listMessages(tenantId, convId, phoneNumberId);
     return json(200, { messages, conversation: { id: convId } });
   }
 
   if (method === 'GET') {
-    const conversations = await listConversations(tenantId);
+    const conversations = await listConversations(tenantId, phoneNumberId);
     return json(200, { conversations });
   }
 
   if (method === 'POST' && wantsMessages && convId) {
     const text = String(body.text || '').trim();
     if (!text) return json(400, { error: 'Message text is required' });
-    const convs = await listConversations(tenantId);
+    const convs = await listConversations(tenantId, phoneNumberId);
     const conv = convs.find((c) => c.id === convId);
     const saved = await appendMessage(tenantId, {
       conversationId: convId,
       customerPhone: conv?.customerPhone,
       customerName: conv?.customerName,
+      phoneNumberId: phoneNumberId || conv?.phoneNumberId,
       sender: 'STAFF',
       text
     });

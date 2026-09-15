@@ -93,10 +93,9 @@ YOU CAN AND MUST HANDLE:
 - order status / tracking from CUSTOMER ORDERS
 - cancel request, complaint, refund policy from FAQs
 - invoice recap, "dobara bhejo", "pic bhejo", "catalog"
-Languages: English, Urdu, Roman Urdu/Hindi, Hindi, Greek, Arabic, Punjabi, mixed slang. Mirror the customer.
+Think first: is this a continuation of Recent chat? If history exists, SAME conversation — never restart, never greet again, never ask "kaunsa product" if draft/history already has the item. Use ORDER DRAFT + history as memory.
 
-Think first: intent, missing info, catalog facts, then reply 1-8 WhatsApp lines like a person.
-Greet at most once. Never invent products, prices, stock, or order numbers.
+Languages: English, Urdu, Roman Urdu/Hindi, Hindi, Greek, Arabic, Punjabi, mixed slang. Mirror the customer.
 If something is truly outside a shop (illegal, medical diagnosis, etc.) refuse politely and offer a product or staff instead.
 
 <<<META
@@ -203,6 +202,15 @@ async function generateAgentReply(incomingText, options = {}) {
     return { reply: null, skipped: true, reason: 'human_active', settings, images: [] };
   }
 
+  let history = [];
+  try {
+    if (options.conversationId) {
+      history = await listMessages(tenantId, options.conversationId, options.phoneNumberId);
+    }
+  } catch (err) {
+    console.warn('[Groq] history load failed', err?.message || err);
+  }
+
   const engine = await applyCustomerTurn({
     tenantId,
     customerPhone,
@@ -212,10 +220,18 @@ async function generateAgentReply(incomingText, options = {}) {
     products,
     businessName,
     deliveryFee,
-    persistOrder: true
+    persistOrder: true,
+    history
   });
 
   const draft = engine.draft || engine.cart;
+  const historyText = history
+    .slice(-16)
+    .filter((m, i, arr) => !(i === arr.length - 1 && m.sender === 'CUSTOMER' && m.text === text))
+    .slice(-12)
+    .map((m) => `${m.sender}: ${m.text}`)
+    .join('\n');
+  const continuing = Boolean(historyText || draft?.items?.length || draft?.selectedProductId);
 
   if (engine.next === 'done' && engine.reply) {
     return {
@@ -226,22 +242,6 @@ async function generateAgentReply(incomingText, options = {}) {
       model: GROQ_MODEL,
       images: []
     };
-  }
-
-  let historyText = '';
-  try {
-    const convId = options.conversationId;
-    if (convId) {
-      const msgs = await listMessages(tenantId, convId);
-      historyText = msgs
-        .slice(-16)
-        .filter((m, i, arr) => !(i === arr.length - 1 && m.sender === 'CUSTOMER' && m.text === text))
-        .slice(-12)
-        .map((m) => `${m.sender}: ${m.text}`)
-        .join('\n');
-    }
-  } catch (err) {
-    console.warn('[Groq] history load failed', err?.message || err);
   }
 
   const ranked = searchProducts(products, text).slice(0, 12).map((row) => row.product);
@@ -296,7 +296,7 @@ async function generateAgentReply(incomingText, options = {}) {
                 historyText,
                 catalog,
                 draftText: formatDraftForPrompt(draft),
-                greeted: Boolean(engine.greetedBefore),
+                greeted: Boolean(engine.greetedBefore || continuing),
                 engineHint,
                 storeOps,
                 customerOrders: customerOrders || '(none yet)'
@@ -321,7 +321,7 @@ async function generateAgentReply(incomingText, options = {}) {
     }
   }
 
-  if (engine.greetedBefore) {
+  if (engine.greetedBefore || continuing) {
     reply = stripRepeatedGreeting(reply);
   }
 

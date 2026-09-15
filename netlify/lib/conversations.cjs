@@ -48,19 +48,20 @@ function mapMessage(row, tenantId) {
 
 function mergeConversations(primary, secondary) {
   const map = new Map();
+  const byPhone = new Map();
   for (const conv of [...secondary, ...primary]) {
     if (!conv) continue;
-    const key = conv.id || normalizePhone(conv.customerPhone);
-    const prev = map.get(key);
-    if (!prev) {
-      map.set(key, conv);
-      continue;
+    const phone = normalizePhone(conv.customerPhone);
+    const prev = (conv.id && map.get(conv.id)) || (phone && byPhone.get(phone)) || null;
+    const next =
+      !prev || new Date(conv.lastMessageAt || 0).getTime() >= new Date(prev.lastMessageAt || 0).getTime()
+        ? { ...prev, ...conv }
+        : { ...conv, ...prev };
+    if (prev?.id && next.id && prev.id !== next.id) {
+      map.delete(prev.id);
     }
-    const newer =
-      new Date(conv.lastMessageAt || 0).getTime() >= new Date(prev.lastMessageAt || 0).getTime()
-        ? conv
-        : prev;
-    map.set(key, newer);
+    map.set(next.id || phone, next);
+    if (phone) byPhone.set(phone, next);
   }
   return [...map.values()].sort(
     (a, b) => new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime()
@@ -115,8 +116,8 @@ async function conversationsFromMessages(tenantId) {
   });
 }
 
-async function listConversations(tenantId) {
-  const local = await blob.listConversations(tenantId);
+async function listConversations(tenantId, phoneNumberId) {
+  const local = await blob.listConversations(tenantId, phoneNumberId);
   if (!getSupabaseConfig() || !isUuid(tenantId)) return local;
   let remoteRes = await sbSelect('whatsapp_conversations', {
     select: '*',
@@ -130,14 +131,26 @@ async function listConversations(tenantId) {
     });
   }
   let remote = remoteRes.ok ? remoteRes.rows.map((row) => mapConversation(row, tenantId)) : [];
+  if (phoneNumberId) {
+    const byPhone = await sbSelect('whatsapp_conversations', {
+      select: '*',
+      phone_number_id: `eq.${phoneNumberId}`
+    });
+    if (byPhone.ok && byPhone.rows.length) {
+      remote = mergeConversations(
+        remote,
+        byPhone.rows.map((row) => mapConversation(row, tenantId))
+      );
+    }
+  }
   if (!remote.length) {
     remote = await conversationsFromMessages(tenantId);
   }
   return mergeConversations(remote, local);
 }
 
-async function listMessages(tenantId, conversationId) {
-  const local = await blob.listMessages(tenantId, conversationId);
+async function listMessages(tenantId, conversationId, phoneNumberId) {
+  const local = await blob.listMessages(tenantId, conversationId, phoneNumberId);
   if (!getSupabaseConfig() || !isUuid(tenantId)) return local;
   if (isUuid(conversationId)) {
     const { ok, rows } = await sbSelect('whatsapp_messages', {

@@ -31,6 +31,29 @@ async function saveInbox(tenantId, state) {
   return true;
 }
 
+function wabaKey(phoneNumberId) {
+  return `waba:${String(phoneNumberId || '').trim()}`;
+}
+
+async function loadWabaInbox(phoneNumberId) {
+  if (!phoneNumberId) return emptyState();
+  const store = await getStore();
+  if (!store) return emptyState();
+  try {
+    return (await store.get(wabaKey(phoneNumberId), { type: 'json' })) || emptyState();
+  } catch {
+    return emptyState();
+  }
+}
+
+async function saveWabaInbox(phoneNumberId, state) {
+  if (!phoneNumberId) return false;
+  const store = await getStore();
+  if (!store) return false;
+  await store.setJSON(wabaKey(phoneNumberId), state);
+  return true;
+}
+
 function upsertConversation(state, data) {
   const now = new Date().toISOString();
   const phone = String(data.customerPhone || '').replace(/\s/g, '');
@@ -83,19 +106,47 @@ async function appendMessage(tenantId, data) {
   };
   state.messagesByConv[conv.id].push(msg);
   await saveInbox(tenantId, state);
+
+  const phoneNumberId = data.phoneNumberId;
+  if (phoneNumberId) {
+    const waba = await loadWabaInbox(phoneNumberId);
+    const wabaConv = upsertConversation(waba, { ...data, tenantId, conversationId: conv.id });
+    if (!waba.messagesByConv[wabaConv.id]) waba.messagesByConv[wabaConv.id] = [];
+    waba.messagesByConv[wabaConv.id].push(msg);
+    await saveWabaInbox(phoneNumberId, waba);
+  }
+
   return { conversation: conv, message: msg, persisted: true };
 }
 
-async function listConversations(tenantId) {
+async function listConversations(tenantId, phoneNumberId) {
   const state = await loadInbox(tenantId);
-  return [...state.conversations].sort(
+  const waba = await loadWabaInbox(phoneNumberId);
+  const map = new Map();
+  for (const conv of [...(waba.conversations || []), ...(state.conversations || [])]) {
+    if (!conv) continue;
+    map.set(conv.id || conv.customerPhone, conv);
+  }
+  return [...map.values()].sort(
     (a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
   );
 }
 
-async function listMessages(tenantId, conversationId) {
+async function listMessages(tenantId, conversationId, phoneNumberId) {
   const state = await loadInbox(tenantId);
-  return state.messagesByConv[conversationId] || [];
+  const local = state.messagesByConv[conversationId] || [];
+  const waba = await loadWabaInbox(phoneNumberId);
+  const extra = waba.messagesByConv[conversationId] || [];
+  const seen = new Set();
+  const merged = [];
+  for (const msg of [...local, ...extra]) {
+    if (!msg) continue;
+    const key = msg.whatsappMessageId || msg.id || `${msg.sender}:${msg.text}:${msg.createdAt}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(msg);
+  }
+  return merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 }
 
 async function setConversationStatus(tenantId, conversationId, status) {

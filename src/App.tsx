@@ -32,6 +32,39 @@ import { BillingView } from './components/BillingView';
 import { OnboardingModal } from './components/OnboardingModal';
 import { AuthView } from './components/AuthView';
 import { authHeaders, clearSession, loadSession, saveSession, AuthUser } from './authSession';
+
+const APP_VIEW_KEY = 'orderdesk_ui_view';
+const APP_CONV_KEY = 'orderdesk_ui_conv';
+const APP_VIEWS = new Set([
+  'dashboard',
+  'inbox',
+  'simulator',
+  'orders',
+  'products',
+  'customers',
+  'ai-settings',
+  'whatsapp',
+  'team',
+  'billing',
+  'analytics'
+]);
+
+function loadSavedView(): string {
+  try {
+    const view = localStorage.getItem(APP_VIEW_KEY) || '';
+    return APP_VIEWS.has(view) ? view : 'dashboard';
+  } catch {
+    return 'dashboard';
+  }
+}
+
+function loadSavedConvId(): string | null {
+  try {
+    return localStorage.getItem(APP_CONV_KEY) || null;
+  } catch {
+    return null;
+  }
+}
 import {
   loadLocalWhatsAppConfig,
   saveLocalWhatsAppConfig,
@@ -90,7 +123,7 @@ export default function App() {
   // Tenant-isolated domain data
   const [orders, setOrders] = useState<Order[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
+  const [selectedConvId, setSelectedConvId] = useState<string | null>(() => loadSavedConvId());
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -148,6 +181,23 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!authUser || !APP_VIEWS.has(currentView)) return;
+    try {
+      localStorage.setItem(APP_VIEW_KEY, currentView);
+    } catch {
+      /* ignore */
+    }
+  }, [authUser, currentView]);
+
+  useEffect(() => {
+    try {
+      if (selectedConvId) localStorage.setItem(APP_CONV_KEY, selectedConvId);
+    } catch {
+      /* ignore */
+    }
+  }, [selectedConvId]);
+
+  useEffect(() => {
     let isMounted = true;
     async function boot() {
       const session = loadSession();
@@ -178,7 +228,9 @@ export default function App() {
         if (localTenant) {
           setTenants([localTenant]);
           setCurrentTenant(localTenant);
-          setCurrentView('dashboard');
+          setCurrentView(loadSavedView());
+          const savedConv = loadSavedConvId();
+          if (savedConv) setSelectedConvId(savedConv);
         }
       };
 
@@ -231,7 +283,7 @@ export default function App() {
           const named = list.map(applySavedStoreProfile);
           setTenants(named);
           setCurrentTenant(named[0]);
-          setCurrentView('dashboard');
+          setCurrentView(loadSavedView());
         }
       } catch (err) {
         console.warn('Session verify skipped, using saved login:', err);
@@ -291,22 +343,6 @@ export default function App() {
       let loadedCustomers = Array.isArray(customersRes) ? customersRes : (customersRes?.customers || []);
       const loadedNotifs = Array.isArray(notifsRes) ? notifsRes : (notifsRes?.notifications || []);
       const loadedMembers = Array.isArray(teamRes) ? teamRes : (teamRes?.members || []);
-
-      try {
-        const syncRes = await fetch('/api/conversations/sync', { method: 'POST', headers });
-        const syncRaw = await syncRes.text();
-        if (syncRes.ok && syncRaw && !syncRaw.trimStart().startsWith('<')) {
-          const syncData = JSON.parse(syncRaw);
-          if (Array.isArray(syncData.conversations)) loadedConvs = syncData.conversations;
-          if (Array.isArray(syncData.orders) && syncData.orders.length) {
-            const map = new Map(loadedOrders.map((o: Order) => [o.id, o]));
-            syncData.orders.forEach((o: Order) => map.set(o.id, o));
-            loadedOrders = [...map.values()];
-          }
-        }
-      } catch {
-        /* historical chat processing is best-effort */
-      }
 
       if (!loadedCustomers.length && (loadedConvs.length || loadedOrders.length)) {
         const byPhone = new Map<string, Customer>();
@@ -444,7 +480,7 @@ export default function App() {
     };
 
     pollInbox();
-    const timer = window.setInterval(pollInbox, 4000);
+    const timer = window.setInterval(pollInbox, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -476,7 +512,7 @@ export default function App() {
       }
     }
     loadMessages();
-    const timer = window.setInterval(loadMessages, 4000);
+    const timer = window.setInterval(loadMessages, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

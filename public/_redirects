@@ -23,6 +23,9 @@
 /api/conversations  /.netlify/functions/inbox  200!
 /api/conversations/  /.netlify/functions/inbox  200!
 /api/conversations/*  /.netlify/functions/inbox  200!
+/api/inbox  /.netlify/functions/inbox  200!
+/api/inbox/  /.netlify/functions/inbox  200!
+/api/inbox/*  /.netlify/functions/inbox  200!
 /api/tenants  /.netlify/functions/tenants  200!
 /api/tenants/  /.netlify/functions/tenants  200!
 /api/tenants/*  /.netlify/functions/tenants  200!

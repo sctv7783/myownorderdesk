@@ -178,7 +178,8 @@ async function handleIncoming(payload) {
           customerPhone: senderPhone,
           businessName: store?.name || stored?.verifiedName || stored?.businessName,
           conversationId: savedIn?.conversation?.id,
-          conversationStatus: savedIn?.conversation?.status
+          conversationStatus: savedIn?.conversation?.status,
+          phoneNumberId: phoneId
         });
 
         if (result.skipped) {
