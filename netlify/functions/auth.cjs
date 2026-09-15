@@ -1,7 +1,8 @@
-const { createAuthUser, passwordLogin, userFromAccessToken } = require('../lib/auth.cjs');
-const { getSupabaseConfig, isUuid, sbSelect, sbInsert } = require('../lib/supabase-rest.cjs');
+const { createAuthUser, passwordLogin, userFromAccessToken, refreshSession } = require('../lib/auth.cjs');
+const { getSupabaseConfig, sbSelect, sbInsert } = require('../lib/supabase-rest.cjs');
 const { mapBusiness } = require('../lib/business.cjs');
 const { seedAgentSettings } = require('../lib/ai-settings-store.cjs');
+const { readAccessToken } = require('../lib/http.cjs');
 
 function json(statusCode, payload) {
   return {
@@ -21,34 +22,45 @@ function parseBody(event) {
   }
 }
 
-function bearer(event) {
-  const header = event.headers?.authorization || event.headers?.Authorization || '';
-  const match = String(header).match(/^Bearer\s+(.+)$/i);
-  return match ? match[1].trim() : '';
-}
-
 function pathName(event) {
-  const path = event.path || '';
-  const parts = path.split('/').filter(Boolean);
+  const path = `${event.path || ''} ${event.rawUrl || ''} ${event.rawPath || ''}`;
+  if (/\/register\b|\/signup\b/.test(path)) return 'register';
+  if (/\/login\b/.test(path)) return 'login';
+  if (/\/refresh\b/.test(path)) return 'refresh';
+  if (/\/me\b/.test(path)) return 'me';
+  const parts = String(event.path || '').split('/').filter(Boolean);
   const idx = parts.lastIndexOf('auth');
-  return (idx >= 0 ? parts[idx + 1] : '') || '';
+  return (idx >= 0 && parts[idx + 1] ? parts[idx + 1] : '') || '';
 }
 
-async function businessesForUser(userId) {
-  const members = await sbSelect('business_members', {
-    select: '*',
-    user_id: `eq.${userId}`,
-    status: 'eq.ACTIVE'
-  });
-  const ids = (members.rows || []).map((row) => row.business_id).filter(Boolean);
-  if (!ids.length) return [];
-  const listed = await sbSelect('businesses', { select: '*', id: `in.(${ids.join(',')})` });
-  return (listed.rows || []).map(mapBusiness).filter(Boolean);
+async function businessesForUser(userId, email) {
+  let rows = [];
+  if (userId) {
+    const members = await sbSelect('business_members', { select: '*', user_id: `eq.${userId}` });
+    const ids = (members.rows || []).map((row) => row.business_id).filter(Boolean);
+    if (ids.length) {
+      const listed = await sbSelect('businesses', { select: '*', id: `in.(${ids.join(',')})` });
+      rows = listed.rows || [];
+    }
+  }
+  if (!rows.length && email) {
+    const byEmail = await sbSelect('businesses', { select: '*', email: `eq.${email}` });
+    rows = byEmail.rows || [];
+  }
+  return rows.map(mapBusiness).filter(Boolean);
+}
+
+async function insertBusiness(payload) {
+  let result = await sbInsert('businesses', payload);
+  if (result.ok) return result;
+  const { email, ...withoutEmail } = payload;
+  result = await sbInsert('businesses', withoutEmail);
+  return result;
 }
 
 async function createStoreForUser(user, { fullName, businessName, businessType, email }) {
   const name = String(businessName || `${fullName || email}'s Store`).trim();
-  const created = await sbInsert('businesses', {
+  const created = await insertBusiness({
     name,
     slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
     business_type: businessType || 'E-Commerce',
@@ -58,14 +70,21 @@ async function createStoreForUser(user, { fullName, businessName, businessType, 
   });
   const business = Array.isArray(created.data) ? created.data[0] : created.data;
   if (!created.ok || !business?.id) {
-    return { ok: false, error: created.error || 'Could not create store.' };
+    return { ok: false, error: created.error || 'Could not create store in Supabase businesses table.' };
   }
 
-  await sbInsert('profiles', {
+  const profile = await sbInsert('profiles', {
     id: user.id,
     email,
-    full_name: fullName || email.split('@')[0]
+    full_name: fullName || String(email).split('@')[0]
   });
+  if (!profile.ok) {
+    await sbInsert('profiles', {
+      email,
+      full_name: fullName || String(email).split('@')[0]
+    });
+  }
+
   await sbInsert('business_members', {
     business_id: business.id,
     user_id: user.id,
@@ -98,6 +117,39 @@ function sessionPayload({ session, user, tenant, tenants }) {
     tenant,
     tenants: tenants || (tenant ? [tenant] : [])
   };
+}
+
+async function resolveUserSession(event, body) {
+  let accessToken = readAccessToken(event, body);
+  let session = { access_token: accessToken, refresh_token: body?.refreshToken };
+  let me = accessToken ? await userFromAccessToken(accessToken) : { ok: false };
+
+  if (!me.ok && body?.refreshToken) {
+    const refreshed = await refreshSession(body.refreshToken);
+    if (refreshed.ok && refreshed.data?.access_token) {
+      session = refreshed.data;
+      accessToken = refreshed.data.access_token;
+      me = await userFromAccessToken(accessToken);
+    }
+  }
+
+  if (!me.ok || !me.data) {
+    return { ok: false, error: me.error || 'Session expire ho gayi. Dobara login karein.' };
+  }
+
+  const user = me.data;
+  let tenants = await businessesForUser(user.id, user.email);
+  if (!tenants.length) {
+    const store = await createStoreForUser(user, {
+      fullName: user.user_metadata?.full_name || '',
+      businessName: `${String(user.email || 'My').split('@')[0]} Store`,
+      businessType: 'E-Commerce',
+      email: user.email
+    });
+    if (store.ok) tenants = [store.tenant];
+  }
+
+  return { ok: true, session, user, tenants };
 }
 
 exports.handler = async function handler(event) {
@@ -138,9 +190,13 @@ exports.handler = async function handler(event) {
     const login = await passwordLogin(email, password);
     if (!login.ok) return json(400, { success: false, error: login.error });
     const user = login.data.user || created.data;
-    const store = await createStoreForUser(user, { fullName, businessName, businessType, email });
-    if (!store.ok) return json(400, { success: false, error: store.error });
-    return json(200, sessionPayload({ session: login.data, user, tenant: store.tenant }));
+    let tenants = await businessesForUser(user.id, email);
+    if (!tenants.length) {
+      const store = await createStoreForUser(user, { fullName, businessName, businessType, email });
+      if (!store.ok) return json(400, { success: false, error: store.error });
+      tenants = [store.tenant];
+    }
+    return json(200, sessionPayload({ session: login.data, user, tenant: tenants[0], tenants }));
   }
 
   if (method === 'POST' && action === 'login') {
@@ -150,7 +206,7 @@ exports.handler = async function handler(event) {
     const login = await passwordLogin(email, password);
     if (!login.ok) return json(401, { success: false, error: 'Email ya password ghalat hai.' });
     const user = login.data.user;
-    let tenants = await businessesForUser(user.id);
+    let tenants = await businessesForUser(user.id, email);
     if (!tenants.length) {
       const store = await createStoreForUser(user, {
         fullName: user.user_metadata?.full_name || '',
@@ -160,25 +216,30 @@ exports.handler = async function handler(event) {
       });
       if (store.ok) tenants = [store.tenant];
     }
+    if (!tenants.length) {
+      return json(400, { success: false, error: 'Login ho gaya magar store Supabase mein create nahi hua.' });
+    }
     return json(200, sessionPayload({ session: login.data, user, tenant: tenants[0], tenants }));
   }
 
-  if (method === 'GET' || action === 'me') {
-    const token = bearer(event);
-    if (!token) return json(401, { success: false, error: 'Login required.' });
-    const me = await userFromAccessToken(token);
-    if (!me.ok || !me.data) return json(401, { success: false, error: 'Session expire ho gayi. Dobara login karein.' });
-    const tenants = await businessesForUser(me.data.id);
-    return json(200, {
-      success: true,
-      user: {
-        id: me.data.id,
-        email: me.data.email,
-        fullName: me.data.user_metadata?.full_name || me.data.email
-      },
-      tenant: tenants[0] || null,
-      tenants
-    });
+  if (method === 'POST' && action === 'refresh') {
+    const refreshed = await refreshSession(body.refreshToken);
+    if (!refreshed.ok) return json(401, { success: false, error: refreshed.error });
+    const me = await userFromAccessToken(refreshed.data.access_token);
+    const user = me.data || {};
+    const tenants = await businessesForUser(user.id, user.email);
+    return json(200, sessionPayload({ session: refreshed.data, user, tenant: tenants[0], tenants }));
+  }
+
+  if (method === 'GET' || action === 'me' || (method === 'POST' && action === 'session')) {
+    const resolved = await resolveUserSession(event, body);
+    if (!resolved.ok) return json(401, { success: false, error: resolved.error });
+    return json(200, sessionPayload({
+      session: resolved.session,
+      user: resolved.user,
+      tenant: resolved.tenants[0] || null,
+      tenants: resolved.tenants
+    }));
   }
 
   return json(405, { success: false, error: 'Method Not Allowed' });

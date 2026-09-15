@@ -1,12 +1,13 @@
 const { getSupabaseConfig, isUuid, sbSelect, sbInsert } = require('./supabase-rest.cjs');
 
+const { readHeader } = require('./http.cjs');
+
 function tenantFromEvent(event, body) {
   return (
-    event.headers?.['x-tenant-id'] ||
-    event.headers?.['X-Tenant-Id'] ||
+    readHeader(event, 'x-tenant-id') ||
+    readHeader(event, 'x-orderdesk-tenant') ||
     body?.tenantId ||
     body?.businessId ||
-    process.env.DEFAULT_TENANT_ID ||
     ''
   );
 }

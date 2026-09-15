@@ -73,8 +73,24 @@ async function userFromAccessToken(accessToken) {
   return authJson('user', { method: 'GET', accessToken });
 }
 
+async function refreshSession(refreshToken) {
+  const cfg = getSupabaseConfig();
+  if (!cfg || !refreshToken) return { ok: false, error: 'Missing refresh token.', data: null };
+  const res = await fetch(`${cfg.url}/auth/v1/token?grant_type=refresh_token`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ refresh_token: refreshToken })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return { ok: false, error: data.error_description || data.msg || 'Session refresh failed.', data };
+  }
+  return { ok: true, data };
+}
+
 module.exports = {
   createAuthUser,
   passwordLogin,
-  userFromAccessToken
+  userFromAccessToken,
+  refreshSession
 };

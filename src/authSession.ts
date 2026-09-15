@@ -6,11 +6,23 @@ export type AuthUser = {
   fullName: string;
 };
 
+export type SessionTenant = {
+  id: string;
+  name: string;
+  slug: string;
+  businessType: string;
+  currency: string;
+  timezone: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AuthSession = {
   accessToken: string;
   refreshToken?: string;
   user: AuthUser;
   tenantId?: string;
+  tenant?: SessionTenant | null;
 };
 
 export function loadSession(): AuthSession | null {
@@ -38,8 +50,14 @@ export function authHeaders(tenantId?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   };
-  const tid = tenantId || session?.tenantId;
-  if (tid) headers['x-tenant-id'] = tid;
-  if (session?.accessToken) headers.Authorization = `Bearer ${session.accessToken}`;
+  const tid = tenantId || session?.tenantId || session?.tenant?.id;
+  if (tid) {
+    headers['x-tenant-id'] = tid;
+    headers['x-orderdesk-tenant'] = tid;
+  }
+  if (session?.accessToken) {
+    headers.Authorization = `Bearer ${session.accessToken}`;
+    headers['x-orderdesk-token'] = session.accessToken;
+  }
   return headers;
 }

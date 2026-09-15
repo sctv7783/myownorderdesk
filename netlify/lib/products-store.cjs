@@ -1,32 +1,94 @@
 const { getSupabaseConfig, isUuid, sbSelect, sbInsert, sbUpdate, sbDelete } = require('./supabase-rest.cjs');
 
+async function getBlobStore() {
+  try {
+    const { getStore } = require('@netlify/blobs');
+    return getStore('orderdesk-products');
+  } catch {
+    return null;
+  }
+}
+
+async function loadBlobProducts(tenantId) {
+  const store = await getBlobStore();
+  if (!store || !tenantId) return [];
+  try {
+    const data = await store.get(`tenant:${tenantId}`, { type: 'json' });
+    return Array.isArray(data?.products) ? data.products : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveBlobProducts(tenantId, products) {
+  const store = await getBlobStore();
+  if (!store || !tenantId) return false;
+  await store.setJSON(`tenant:${tenantId}`, { products, updatedAt: new Date().toISOString() });
+  return true;
+}
+
 function mapProduct(row, tenantId) {
   if (!row) return null;
-  const stock = Number(row.stock_quantity ?? row.stock ?? 0);
-  const reserved = Number(row.reserved_quantity || 0);
+  const stock = Number(row.stock_quantity ?? row.stock ?? row.stockQuantity ?? 0);
+  const reserved = Number(row.reserved_quantity ?? row.reservedQuantity ?? 0);
   return {
     id: row.id,
-    tenantId: row.business_id || tenantId,
+    tenantId: row.business_id || row.tenantId || tenantId,
     categoryId: row.category_id || undefined,
-    categoryName: row.category || 'General',
+    categoryName: row.category || row.categoryName || 'General',
     name: row.name,
     sku: row.sku || '',
     description: row.description || '',
     price: Number(row.price || 0),
-    salePrice: row.sale_price != null ? Number(row.sale_price) : undefined,
-    imageUrl: row.image_url || undefined,
+    salePrice: row.sale_price != null ? Number(row.sale_price) : row.salePrice,
+    imageUrl: row.image_url || row.imageUrl || undefined,
     stockQuantity: stock,
     reservedQuantity: reserved,
     availableQuantity: Math.max(0, stock - reserved),
-    lowStockThreshold: Number(row.low_stock_threshold || 5),
-    isActive: row.is_active !== false,
+    lowStockThreshold: Number(row.low_stock_threshold ?? row.lowStockThreshold ?? 5),
+    isActive: row.is_active !== false && row.isActive !== false,
     variants: row.variants || [],
-    createdAt: row.created_at || new Date().toISOString(),
-    updatedAt: row.updated_at || row.created_at || new Date().toISOString()
+    createdAt: row.created_at || row.createdAt || new Date().toISOString(),
+    updatedAt: row.updated_at || row.updatedAt || new Date().toISOString()
   };
 }
 
-function toRow(tenantId, data) {
+function variants(full) {
+  const stock = Number(full.stock_quantity ?? 0);
+  return [
+    full,
+    {
+      business_id: full.business_id,
+      name: full.name,
+      sku: full.sku,
+      description: full.description,
+      price: full.price,
+      sale_price: full.sale_price,
+      image_url: full.image_url,
+      stock,
+      is_active: full.is_active,
+      category: full.category
+    },
+    {
+      business_id: full.business_id,
+      name: full.name,
+      sku: full.sku,
+      description: full.description,
+      price: full.price,
+      image_url: full.image_url,
+      stock,
+      is_active: full.is_active
+    },
+    {
+      business_id: full.business_id,
+      name: full.name,
+      price: full.price,
+      stock
+    }
+  ];
+}
+
+function toFullRow(tenantId, data) {
   const stock = Number(data.stockQuantity ?? data.stock ?? 0);
   const row = {
     business_id: tenantId,
@@ -48,68 +110,113 @@ function toRow(tenantId, data) {
   return row;
 }
 
+function mergeById(primary, secondary) {
+  const map = new Map();
+  for (const item of [...secondary, ...primary]) {
+    if (!item?.id && !item?.name) continue;
+    map.set(item.id || item.name, item);
+  }
+  return [...map.values()].sort(
+    (a, b) => new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime()
+  );
+}
+
 async function listProducts(tenantId) {
-  if (!getSupabaseConfig() || !tenantId) return [];
-  const { rows } = await sbSelect('products', {
+  const blob = await loadBlobProducts(tenantId);
+  if (!getSupabaseConfig() || !tenantId) return blob;
+  const { ok, rows } = await sbSelect('products', {
     select: '*',
     business_id: `eq.${tenantId}`,
     order: 'created_at.desc'
   });
-  return rows.map((row) => mapProduct(row, tenantId)).filter(Boolean);
+  const fromDb = ok ? rows.map((row) => mapProduct(row, tenantId)).filter(Boolean) : [];
+  const merged = mergeById(fromDb, blob);
+  if (merged.length) await saveBlobProducts(tenantId, merged);
+  return merged;
 }
 
 async function getProduct(tenantId, productId) {
-  const { rows } = await sbSelect('products', {
-    select: '*',
-    id: `eq.${productId}`,
-    business_id: `eq.${tenantId}`
-  });
-  return mapProduct(rows[0], tenantId);
+  const all = await listProducts(tenantId);
+  return all.find((p) => p.id === productId) || null;
 }
 
 async function createProduct(tenantId, data) {
-  if (!getSupabaseConfig()) {
+  const mapped = mapProduct(
+    {
+      ...data,
+      id: data.id && isUuid(data.id) ? data.id : undefined,
+      tenantId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    },
+    tenantId
+  );
+  if (!mapped?.name) return { ok: false, error: 'Product name is required.' };
+
+  let saved = null;
+  let lastError = 'Supabase insert failed.';
+  if (getSupabaseConfig() && tenantId) {
+    const full = toFullRow(tenantId, mapped);
+    for (const payload of variants(full)) {
+      const result = await sbInsert('products', payload);
+      if (result.ok) {
+        const row = Array.isArray(result.data) ? result.data[0] : result.data;
+        saved = mapProduct(row, tenantId) || mapped;
+        break;
+      }
+      lastError = result.error || lastError;
+    }
+  }
+
+  const product = saved || {
+    ...mapped,
+    id: mapped.id || `prod_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  };
+  const existing = await loadBlobProducts(tenantId);
+  await saveBlobProducts(tenantId, [product, ...existing.filter((p) => p.id !== product.id && p.name !== product.name)]);
+  if (!saved && !getSupabaseConfig()) {
     return { ok: false, error: 'Supabase is not configured on Netlify.' };
   }
-  const row = toRow(tenantId, data);
-  if (!row.name) return { ok: false, error: 'Product name is required.' };
-  const result = await sbInsert('products', row);
-  if (!result.ok) return { ok: false, error: result.error };
-  const saved = Array.isArray(result.data) ? result.data[0] : result.data;
-  return { ok: true, product: mapProduct(saved, tenantId) };
+  if (!saved) {
+    return { ok: true, product, warning: lastError, persisted: 'blob' };
+  }
+  return { ok: true, product, persisted: 'supabase' };
 }
 
 async function createProducts(tenantId, items) {
   const created = [];
+  let lastError = '';
   for (const item of items || []) {
     const result = await createProduct(tenantId, item);
     if (result.ok && result.product) created.push(result.product);
+    else lastError = result.error || lastError;
   }
-  return created;
+  return { products: created, error: lastError };
 }
 
 async function updateProduct(tenantId, productId, data) {
   const current = await getProduct(tenantId, productId);
   if (!current) return { ok: false, error: 'Product not found.' };
-  const row = toRow(tenantId, { ...current, ...data, id: productId });
-  delete row.id;
-  delete row.business_id;
-  const result = await sbUpdate(
-    'products',
-    { id: `eq.${productId}`, business_id: `eq.${tenantId}` },
-    row
-  );
-  if (!result.ok) return { ok: false, error: result.error };
-  const saved = Array.isArray(result.data) ? result.data[0] : result.data;
-  return { ok: true, product: mapProduct(saved, tenantId) || { ...current, ...data } };
+  const next = { ...current, ...data, id: productId, updatedAt: new Date().toISOString() };
+  if (getSupabaseConfig() && isUuid(productId)) {
+    const row = toFullRow(tenantId, next);
+    delete row.id;
+    delete row.business_id;
+    await sbUpdate('products', { id: `eq.${productId}`, business_id: `eq.${tenantId}` }, row);
+  }
+  const all = await loadBlobProducts(tenantId);
+  const updated = [next, ...all.filter((p) => p.id !== productId)];
+  await saveBlobProducts(tenantId, updated);
+  return { ok: true, product: next };
 }
 
 async function deleteProduct(tenantId, productId) {
-  const result = await sbDelete('products', {
-    id: `eq.${productId}`,
-    business_id: `eq.${tenantId}`
-  });
-  return { ok: result.ok, error: result.error };
+  if (getSupabaseConfig() && isUuid(productId)) {
+    await sbDelete('products', { id: `eq.${productId}`, business_id: `eq.${tenantId}` });
+  }
+  const all = (await loadBlobProducts(tenantId)).filter((p) => p.id !== productId);
+  await saveBlobProducts(tenantId, all);
+  return { ok: true };
 }
 
 async function adjustStock(tenantId, productId, changeQuantity) {

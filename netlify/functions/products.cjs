@@ -6,7 +6,6 @@ const {
   deleteProduct,
   adjustStock
 } = require('../lib/products-store.cjs');
-const { getSupabaseConfig } = require('../lib/supabase-rest.cjs');
 
 function json(statusCode, payload) {
   return {
@@ -39,16 +38,9 @@ exports.handler = async function handler(event) {
   const method = (event.httpMethod || 'GET').toUpperCase();
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
-  if (!getSupabaseConfig()) {
-    return json(503, {
-      success: false,
-      error: 'Supabase connected nahi hai. Netlify env mein SUPABASE_URL aur SUPABASE_SERVICE_ROLE_KEY set karein.'
-    });
-  }
-
   const body = parseBody(event);
   const tenantId = await resolveBusinessId(event, body);
-  if (!tenantId) return json(400, { success: false, error: 'No business found.' });
+  if (!tenantId) return json(400, { success: false, error: 'No business found. Login karke store select karein.' });
 
   const { productId, wantsAdjust } = parsePath(event);
 

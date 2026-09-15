@@ -250,6 +250,14 @@ exports.handler = async function handler(event) {
   }
 
   const tenantId = await resolveBusinessId(event, body);
+  if (!tenantId) {
+    return json(400, {
+      success: false,
+      count: 0,
+      products: [],
+      error: 'Store ID missing. Login karke import karein.'
+    });
+  }
   const origin = parsedUrl.origin;
   let collected = [];
 
@@ -321,19 +329,21 @@ exports.handler = async function handler(event) {
     }
 
     const saved = await createProducts(tenantId, collected);
-    if (!saved.length) {
+    const products = saved.products || [];
+    if (!products.length) {
       return json(500, {
         success: false,
         count: 0,
         products: [],
         error:
-          'Products extract ho gaye magar Supabase mein save nahi hue. Netlify pe SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY check karein, aur SQL schema run karein.'
+          saved.error ||
+          'Products extract ho gaye magar save nahi hue. Supabase products table / RLS / columns check karein.'
       });
     }
     return json(200, {
       success: true,
-      count: saved.length,
-      products: saved,
+      count: products.length,
+      products,
       persisted: true
     });
   } catch (err) {

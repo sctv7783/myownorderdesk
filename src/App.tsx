@@ -125,7 +125,8 @@ export default function App() {
       accessToken: data.accessToken,
       refreshToken: data.refreshToken,
       user: data.user,
-      tenantId: tenant?.id
+      tenantId: tenant?.id,
+      tenant: tenant || null
     });
     setAuthUser(data.user);
     if (tenant) {
@@ -151,37 +152,90 @@ export default function App() {
     let isMounted = true;
     async function boot() {
       const session = loadSession();
-      if (!session?.accessToken) {
+      if (!session?.accessToken || !session.user) {
         if (isMounted) {
           setIsLoading(false);
           setCurrentView('landing');
         }
         return;
       }
+
+      const restoreLocal = () => {
+        setAuthUser(session.user);
+        const localTenant = session.tenant
+          ? applySavedStoreProfile(session.tenant as Tenant)
+          : session.tenantId
+            ? applySavedStoreProfile({
+                id: session.tenantId,
+                name: 'My Store',
+                slug: 'my-store',
+                businessType: 'E-Commerce',
+                currency: 'PKR',
+                timezone: 'Asia/Karachi',
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              })
+            : null;
+        if (localTenant) {
+          setTenants([localTenant]);
+          setCurrentTenant(localTenant);
+          setCurrentView('dashboard');
+        }
+      };
+
+      restoreLocal();
+      if (isMounted) setIsLoading(false);
+
       try {
-        const res = await fetch('/api/auth/me', { headers: authHeaders(session.tenantId) });
-        const data = await res.json();
-        if (!res.ok || !data.user) throw new Error('unauthorized');
+        let res = await fetch('/api/auth/me', { headers: authHeaders(session.tenantId) });
+        let raw = await res.text();
+        let data: any = null;
+        try {
+          data = raw && !raw.trimStart().startsWith('<') ? JSON.parse(raw) : null;
+        } catch {
+          data = null;
+        }
+
+        if (!res.ok || !data?.user) {
+          res = await fetch('/api/auth/me', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders(session.tenantId) },
+            body: JSON.stringify({
+              accessToken: session.accessToken,
+              refreshToken: session.refreshToken,
+              action: 'me'
+            })
+          });
+          raw = await res.text();
+          try {
+            data = raw && !raw.trimStart().startsWith('<') ? JSON.parse(raw) : null;
+          } catch {
+            data = null;
+          }
+        }
+
         if (!isMounted) return;
-        setAuthUser(data.user);
-        const list = data.tenants || (data.tenant ? [data.tenant] : []);
+        if (!data?.user) return;
+        const tenant = data.tenant || data.tenants?.[0] || session.tenant;
+        if (data.user) {
+          saveSession({
+            accessToken: data.accessToken || session.accessToken,
+            refreshToken: data.refreshToken || session.refreshToken,
+            user: data.user,
+            tenantId: tenant?.id || session.tenantId,
+            tenant: tenant || session.tenant || null
+          });
+          setAuthUser(data.user);
+        }
+        const list = data.tenants || (tenant ? [tenant] : []);
         if (list.length) {
           const named = list.map(applySavedStoreProfile);
           setTenants(named);
           setCurrentTenant(named[0]);
-          saveSession({ ...session, user: data.user, tenantId: named[0].id });
           setCurrentView('dashboard');
-        } else {
-          setCurrentView('landing');
         }
-      } catch {
-        clearSession();
-        if (isMounted) {
-          setAuthUser(null);
-          setCurrentView('landing');
-        }
-      } finally {
-        if (isMounted) setIsLoading(false);
+      } catch (err) {
+        console.warn('Session verify skipped, using saved login:', err);
       }
     }
     boot();
@@ -239,11 +293,11 @@ export default function App() {
       const loadedNotifs = Array.isArray(notifsRes) ? notifsRes : (notifsRes?.notifications || []);
       const loadedMembers = Array.isArray(teamRes) ? teamRes : (teamRes?.members || []);
 
-      setOrders(loadedOrders);
-      setConversations(loadedConvs);
-      setProducts(loadedProducts);
-      setCustomers(loadedCustomers);
-      setNotifications(loadedNotifs);
+      if (ordersRes) setOrders(loadedOrders);
+      if (convsRes) setConversations(loadedConvs);
+      if (productsRes) setProducts(loadedProducts);
+      if (customersRes) setCustomers(loadedCustomers);
+      if (notifsRes) setNotifications(loadedNotifs);
       setAgentSettings(aiRes?.settings || defaultAgentSettings(tenantId));
       setKnowledgeItems(aiRes?.knowledgeItems || aiRes?.knowledge || []);
       if (waRes?.account) {
@@ -315,10 +369,12 @@ export default function App() {
           headers: authHeaders(currentTenant.id)
         });
         const prodRaw = await prodRes.text();
-        if (!cancelled && prodRaw && !prodRaw.trimStart().startsWith('<')) {
+        if (!cancelled && prodRes.ok && prodRaw && !prodRaw.trimStart().startsWith('<')) {
           const prodData = JSON.parse(prodRaw);
           const productsList = Array.isArray(prodData) ? prodData : prodData?.products || [];
-          if (Array.isArray(productsList)) setProducts(productsList);
+          if (Array.isArray(productsList) && (productsList.length > 0 || prodData?.success)) {
+            setProducts(productsList);
+          }
         }
       } catch {
         /* ignore poll errors */
