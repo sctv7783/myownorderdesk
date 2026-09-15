@@ -17,6 +17,12 @@
 [functions."whatsapp-webhook"]
   timeout = 26
 
+[functions."inbox"]
+  timeout = 26
+
+[functions."orders"]
+  timeout = 26
+
 [functions."products-import"]
   timeout = 26
 
@@ -145,6 +151,24 @@
 [[redirects]]
   from = "/api/ai/knowledge/*"
   to = "/.netlify/functions/ai-settings"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/orders"
+  to = "/.netlify/functions/orders"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/orders/"
+  to = "/.netlify/functions/orders"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/orders/*"
+  to = "/.netlify/functions/orders"
   status = 200
   force = true
 

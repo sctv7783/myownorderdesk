@@ -14,6 +14,7 @@ import {
   ChevronUp
 } from 'lucide-react';
 import { Tenant } from '../types';
+import { authHeaders } from '../authSession';
 
 interface WhatsAppSimulatorProps {
   tenant: Tenant;
@@ -70,10 +71,7 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, gr
     try {
       const res = await fetch('/api/ai/simulate', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': tenant.id
-        },
+        headers: authHeaders(tenant.id),
         body: JSON.stringify({
           message: text,
           customerPhone,

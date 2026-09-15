@@ -49,7 +49,7 @@ function defaultAgentSettings(tenantId: string): AgentSettings {
     greetingMessage:
       'Assalam-o-Alaikum! Welcome to our official WhatsApp store. Main aapki kya madad kar sakta hoon?',
     customInstructions:
-      'Be polite, friendly, and always confirm delivery address and item counts before finalizing any order.',
+      'You are a full WhatsApp sales assistant and order-taker. Recommend catalog products, collect quantity and a complete delivery address, recap the order, then confirm only after the customer says haan/yes.',
     orderConfirmationRequired: true,
     handoffKeywords: ['human', 'agent', 'staff', 'complaint', 'manager', 'madad'],
     enableStockCheck: true,
@@ -286,17 +286,70 @@ export default function App() {
         safeFetch('/api/analytics')
       ]);
 
-      const loadedOrders = Array.isArray(ordersRes) ? ordersRes : (ordersRes?.orders || []);
-      const loadedConvs = Array.isArray(convsRes) ? convsRes : (convsRes?.conversations || []);
+      let loadedOrders = Array.isArray(ordersRes) ? ordersRes : (ordersRes?.orders || []);
+      let loadedConvs = Array.isArray(convsRes) ? convsRes : (convsRes?.conversations || []);
       const loadedProducts = Array.isArray(productsRes) ? productsRes : (productsRes?.products || []);
-      const loadedCustomers = Array.isArray(customersRes) ? customersRes : (customersRes?.customers || []);
+      let loadedCustomers = Array.isArray(customersRes) ? customersRes : (customersRes?.customers || []);
       const loadedNotifs = Array.isArray(notifsRes) ? notifsRes : (notifsRes?.notifications || []);
       const loadedMembers = Array.isArray(teamRes) ? teamRes : (teamRes?.members || []);
 
-      if (ordersRes) setOrders(loadedOrders);
-      if (convsRes) setConversations(loadedConvs);
+      try {
+        const syncRes = await fetch('/api/conversations/sync', { method: 'POST', headers });
+        const syncRaw = await syncRes.text();
+        if (syncRes.ok && syncRaw && !syncRaw.trimStart().startsWith('<')) {
+          const syncData = JSON.parse(syncRaw);
+          if (Array.isArray(syncData.conversations)) loadedConvs = syncData.conversations;
+          if (Array.isArray(syncData.orders) && syncData.orders.length) {
+            const map = new Map(loadedOrders.map((o: Order) => [o.id, o]));
+            syncData.orders.forEach((o: Order) => map.set(o.id, o));
+            loadedOrders = [...map.values()];
+          }
+        }
+      } catch {
+        /* historical chat processing is best-effort */
+      }
+
+      if (!loadedCustomers.length && (loadedConvs.length || loadedOrders.length)) {
+        const byPhone = new Map<string, Customer>();
+        for (const conv of loadedConvs) {
+          byPhone.set(conv.customerPhone, {
+            id: conv.customerId,
+            tenantId,
+            phone: conv.customerPhone,
+            name: conv.customerName,
+            tags: [],
+            firstContact: conv.createdAt,
+            lastContact: conv.lastMessageAt,
+            orderCount: 0,
+            totalSpend: 0,
+            status: 'ACTIVE'
+          });
+        }
+        for (const order of loadedOrders) {
+          const prev = byPhone.get(order.customerPhone) || {
+            id: order.customerId,
+            tenantId,
+            phone: order.customerPhone,
+            name: order.customerName,
+            tags: [],
+            firstContact: order.createdAt,
+            lastContact: order.createdAt,
+            orderCount: 0,
+            totalSpend: 0,
+            status: 'ACTIVE'
+          };
+          prev.orderCount += 1;
+          prev.totalSpend += Number(order.total || 0);
+          prev.lastContact = order.createdAt;
+          byPhone.set(order.customerPhone, prev);
+        }
+        loadedCustomers = [...byPhone.values()];
+      }
+
+      if (ordersRes || loadedOrders.length) setOrders(loadedOrders);
+      if (convsRes || loadedConvs.length) setConversations(loadedConvs);
       if (productsRes) setProducts(loadedProducts);
-      if (customersRes) setCustomers(loadedCustomers);
+      if (customersRes || loadedCustomers.length) setCustomers(loadedCustomers);
       if (notifsRes) setNotifications(loadedNotifs);
       setAgentSettings(aiRes?.settings || defaultAgentSettings(tenantId));
       setKnowledgeItems(aiRes?.knowledgeItems || aiRes?.knowledge || []);
@@ -375,6 +428,16 @@ export default function App() {
           if (Array.isArray(productsList) && (productsList.length > 0 || prodData?.success)) {
             setProducts(productsList);
           }
+        }
+
+        const ordersRes = await fetch('/api/orders', {
+          headers: authHeaders(currentTenant.id)
+        });
+        const ordersRaw = await ordersRes.text();
+        if (!cancelled && ordersRes.ok && ordersRaw && !ordersRaw.trimStart().startsWith('<')) {
+          const ordersData = JSON.parse(ordersRaw);
+          const ordersList = Array.isArray(ordersData) ? ordersData : ordersData?.orders || [];
+          if (Array.isArray(ordersList)) setOrders(ordersList);
         }
       } catch {
         /* ignore poll errors */

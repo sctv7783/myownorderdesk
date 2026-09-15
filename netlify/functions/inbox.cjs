@@ -2,6 +2,9 @@ const { listConversations, listMessages, appendMessage, setConversationStatus } 
 const { resolveBusinessId } = require('../lib/business.cjs');
 const { loadConfig } = require('../lib/whatsapp-store.cjs');
 const { sendWhatsAppText } = require('../lib/meta-graph.cjs');
+const { listProducts } = require('../lib/products-store.cjs');
+const { applyCustomerTurn, clearCart } = require('../lib/order-engine.cjs');
+const { getBusiness } = require('../lib/business.cjs');
 
 function json(statusCode, payload) {
   return {
@@ -21,17 +24,62 @@ function parseBody(event) {
   }
 }
 
+async function processStoredChats(tenantId) {
+  const [conversations, products, business] = await Promise.all([
+    listConversations(tenantId),
+    listProducts(tenantId),
+    getBusiness(tenantId)
+  ]);
+  const created = [];
+  for (const conv of conversations.slice(0, 25)) {
+    const messages = await listMessages(tenantId, conv.id);
+    const orderish = /order|chahiye|address|pata|confirm|haan|han |delivery|bhej|quantity|pcs|rs\.?|price/i;
+    if (!messages.some((msg) => msg.sender === 'CUSTOMER' && orderish.test(String(msg.text || '')))) {
+      continue;
+    }
+    await clearCart(tenantId, conv.customerPhone);
+    for (const msg of messages) {
+      if (msg.sender !== 'CUSTOMER' || !msg.text || String(msg.text).startsWith('[')) continue;
+      const result = await applyCustomerTurn({
+        tenantId,
+        customerPhone: conv.customerPhone,
+        customerName: conv.customerName,
+        text: msg.text,
+        products,
+        businessName: business?.name || '',
+        persistOrder: true
+      });
+      if (result.order) created.push(result.order);
+    }
+  }
+  return {
+    conversations: conversations.length,
+    ordersCreated: created.length,
+    orders: created
+  };
+}
+
 exports.handler = async function handler(event) {
   const method = (event.httpMethod || 'GET').toUpperCase();
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
   const tenantId = await resolveBusinessId(event, body);
+  if (!tenantId) return json(401, { error: 'Store session required', conversations: [] });
+
   const path = event.path || '';
   const parts = path.split('/').filter(Boolean);
   const convIdx = parts.lastIndexOf('conversations');
-  const convId = convIdx >= 0 && parts[convIdx + 1] && parts[convIdx + 1] !== 'messages' ? parts[convIdx + 1] : null;
+  const nextPart = convIdx >= 0 ? parts[convIdx + 1] : null;
+  const convId = nextPart && nextPart !== 'messages' && nextPart !== 'sync' ? nextPart : null;
   const wantsMessages = path.includes('/messages');
+  const wantsSync = path.includes('/sync') || nextPart === 'sync';
+
+  if (method === 'POST' && wantsSync) {
+    const processed = await processStoredChats(tenantId);
+    const conversations = await listConversations(tenantId);
+    return json(200, { success: true, ...processed, conversations });
+  }
 
   if (method === 'GET' && wantsMessages && convId) {
     const messages = await listMessages(tenantId, convId);

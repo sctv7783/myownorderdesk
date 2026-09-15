@@ -119,10 +119,6 @@ async function handleIncoming(payload) {
       const token = stored?.accessToken || creds?.accessToken;
       const phoneId = stored?.phoneNumberId || creds?.phoneNumberId || phoneNumberId;
       const store = await getBusiness(tenantId);
-      if (!token || !phoneId) {
-        console.warn('[Webhook] No Meta token for phone', phoneNumberId);
-        continue;
-      }
 
       for (const msg of messages) {
         const senderPhone = msg.from ? `+${String(msg.from).replace(/\D/g, '')}` : '';
@@ -135,20 +131,27 @@ async function handleIncoming(payload) {
           msg.interactive?.button_reply?.title ||
           (msg.type && msg.type !== 'text' ? `[${msg.type}]` : '');
 
-        await markMessageAsRead({
-          phoneNumberId: phoneId,
-          accessToken: token,
-          messageId: msg.id
-        });
+        if (token && phoneId) {
+          await markMessageAsRead({
+            phoneNumberId: phoneId,
+            accessToken: token,
+            messageId: msg.id
+          });
+        }
 
         const savedIn = await appendMessage(tenantId, {
           customerPhone: senderPhone,
           customerName: contactName,
-          phoneNumberId: phoneId,
+          phoneNumberId: phoneId || phoneNumberId,
           sender: 'CUSTOMER',
           text: incomingText,
           whatsappMessageId: msg.id
         });
+
+        if (!token || !phoneId) {
+          console.warn('[Webhook] Saved inbox message but Meta token missing for', phoneNumberId);
+          continue;
+        }
 
         const result = await generateAgentReply(incomingText, {
           tenantId,

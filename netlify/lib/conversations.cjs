@@ -5,6 +5,12 @@ function normalizePhone(phone) {
   return String(phone || '').replace(/\D/g, '');
 }
 
+function displayPhone(phone) {
+  const digits = normalizePhone(phone);
+  if (!digits) return String(phone || '').trim() || 'unknown';
+  return digits.startsWith('92') ? `+${digits}` : `+${digits}`;
+}
+
 function mapConversation(row, tenantId) {
   if (!row) return null;
   return {
@@ -40,30 +46,69 @@ function mapMessage(row, tenantId) {
   };
 }
 
-async function listConversations(tenantId) {
-  if (!getSupabaseConfig() || !isUuid(tenantId)) {
-    return blob.listConversations(tenantId);
+function mergeConversations(primary, secondary) {
+  const map = new Map();
+  for (const conv of [...secondary, ...primary]) {
+    if (!conv) continue;
+    const key = conv.id || normalizePhone(conv.customerPhone);
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, conv);
+      continue;
+    }
+    const newer =
+      new Date(conv.lastMessageAt || 0).getTime() >= new Date(prev.lastMessageAt || 0).getTime()
+        ? conv
+        : prev;
+    map.set(key, newer);
   }
+  return [...map.values()].sort(
+    (a, b) => new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime()
+  );
+}
+
+async function insertVariants(table, variants) {
+  for (const body of variants) {
+    const result = await sbInsert(table, body);
+    if (result.ok) {
+      const row = Array.isArray(result.data) ? result.data[0] : result.data;
+      if (row) return { ok: true, row };
+    }
+  }
+  return { ok: false, row: null };
+}
+
+async function listConversations(tenantId) {
+  const local = await blob.listConversations(tenantId);
+  if (!getSupabaseConfig() || !isUuid(tenantId)) return local;
   const { ok, rows } = await sbSelect('whatsapp_conversations', {
     select: '*',
     business_id: `eq.${tenantId}`,
     order: 'last_message_at.desc'
   });
-  if (!ok) return blob.listConversations(tenantId);
-  return rows.map((row) => mapConversation(row, tenantId));
+  if (!ok) return local;
+  return mergeConversations(rows.map((row) => mapConversation(row, tenantId)), local);
 }
 
 async function listMessages(tenantId, conversationId) {
-  if (!getSupabaseConfig() || !isUuid(tenantId) || !isUuid(conversationId)) {
-    return blob.listMessages(tenantId, conversationId);
+  const local = await blob.listMessages(tenantId, conversationId);
+  if (!getSupabaseConfig() || !isUuid(tenantId)) return local;
+  if (isUuid(conversationId)) {
+    const { ok, rows } = await sbSelect('whatsapp_messages', {
+      select: '*',
+      conversation_id: `eq.${conversationId}`,
+      order: 'created_at.asc'
+    });
+    if (ok && rows.length) {
+      const remote = rows.map((row) => mapMessage(row, tenantId));
+      const seen = new Set(remote.map((m) => m.whatsappMessageId || `${m.sender}:${m.text}:${m.createdAt}`));
+      const extras = local.filter((m) => !seen.has(m.whatsappMessageId || `${m.sender}:${m.text}:${m.createdAt}`));
+      return [...remote, ...extras].sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
+    }
   }
-  const { ok, rows } = await sbSelect('whatsapp_messages', {
-    select: '*',
-    conversation_id: `eq.${conversationId}`,
-    order: 'created_at.asc'
-  });
-  if (!ok) return blob.listMessages(tenantId, conversationId);
-  return rows.map((row) => mapMessage(row, tenantId));
+  return local;
 }
 
 async function findConversation(tenantId, { conversationId, customerPhone }) {
@@ -75,101 +120,118 @@ async function findConversation(tenantId, { conversationId, customerPhone }) {
     });
     if (rows[0]) return rows[0];
   }
-  const phone = String(customerPhone || '').trim();
-  if (!phone) return null;
+  const phone = displayPhone(customerPhone);
+  const digits = normalizePhone(customerPhone);
+  if (!digits) return null;
   const { rows } = await sbSelect('whatsapp_conversations', {
-    select: '*',
-    business_id: `eq.${tenantId}`,
-    customer_phone: `eq.${phone}`
-  });
-  if (rows[0]) return rows[0];
-  const digits = normalizePhone(phone);
-  const all = await sbSelect('whatsapp_conversations', {
     select: '*',
     business_id: `eq.${tenantId}`
   });
-  return all.rows.find((row) => normalizePhone(row.customer_phone) === digits) || null;
+  return (
+    (rows || []).find((row) => normalizePhone(row.customer_phone) === digits) ||
+    (rows || []).find((row) => row.customer_phone === phone) ||
+    null
+  );
 }
 
 async function appendMessage(tenantId, data) {
-  if (!getSupabaseConfig() || !isUuid(tenantId)) {
-    return blob.appendMessage(tenantId, data);
-  }
-
   const now = new Date().toISOString();
   const sender = data.sender || 'CUSTOMER';
   const text = data.text || '';
-  let conv = await findConversation(tenantId, data);
+  const phone = displayPhone(data.customerPhone);
 
-  if (!conv) {
-    const created = await sbInsert('whatsapp_conversations', {
-      business_id: tenantId,
-      customer_phone: data.customerPhone || 'unknown',
-      customer_name: data.customerName || 'Customer',
-      phone_number_id: data.phoneNumberId || '',
-      status: 'AI_ACTIVE',
-      last_message_text: text,
-      last_message_at: now,
-      unread_count: sender === 'CUSTOMER' ? 1 : 0,
-      updated_at: now
-    });
-    conv = Array.isArray(created.data) ? created.data[0] : created.data;
-    if (!conv?.id) return blob.appendMessage(tenantId, data);
-  } else {
-    await sbUpdate(
-      'whatsapp_conversations',
-      { id: `eq.${conv.id}` },
-      {
-        customer_name: data.customerName || conv.customer_name,
-        last_message_text: text,
-        last_message_at: now,
-        unread_count: sender === 'CUSTOMER' ? Number(conv.unread_count || 0) + 1 : 0,
-        updated_at: now
-      }
-    );
+  let remoteConv = null;
+  if (getSupabaseConfig() && isUuid(tenantId)) {
+    remoteConv = await findConversation(tenantId, { ...data, customerPhone: phone });
+    if (!remoteConv) {
+      const created = await insertVariants('whatsapp_conversations', [
+        {
+          business_id: tenantId,
+          customer_phone: phone,
+          customer_name: data.customerName || 'Customer',
+          phone_number_id: data.phoneNumberId || '',
+          status: 'AI_ACTIVE',
+          last_message_text: text,
+          last_message_at: now,
+          unread_count: sender === 'CUSTOMER' ? 1 : 0,
+          updated_at: now
+        },
+        {
+          business_id: tenantId,
+          customer_phone: phone,
+          customer_name: data.customerName || 'Customer',
+          last_message_text: text
+        }
+      ]);
+      remoteConv = created.row;
+    } else {
+      await sbUpdate(
+        'whatsapp_conversations',
+        { id: `eq.${remoteConv.id}` },
+        {
+          customer_name: data.customerName || remoteConv.customer_name,
+          last_message_text: text,
+          last_message_at: now,
+          unread_count: sender === 'CUSTOMER' ? Number(remoteConv.unread_count || 0) + 1 : 0,
+          updated_at: now
+        }
+      );
+    }
+
+    if (remoteConv?.id) {
+      const direction = sender === 'CUSTOMER' ? 'inbound' : 'outbound';
+      await insertVariants('whatsapp_messages', [
+        {
+          business_id: tenantId,
+          conversation_id: remoteConv.id,
+          direction,
+          sender,
+          message_type: 'text',
+          content: text,
+          text,
+          whatsapp_message_id: data.whatsappMessageId || null,
+          status: data.status || 'DELIVERED',
+          created_at: now
+        },
+        {
+          conversation_id: remoteConv.id,
+          direction,
+          content: text,
+          created_at: now
+        }
+      ]);
+    }
   }
 
-  const direction = sender === 'CUSTOMER' ? 'inbound' : 'outbound';
-  const inserted = await sbInsert('whatsapp_messages', {
-    business_id: tenantId,
-    conversation_id: conv.id,
-    direction,
-    sender,
-    message_type: 'text',
-    content: text,
-    text,
-    whatsapp_message_id: data.whatsappMessageId || null,
-    status: data.status || 'DELIVERED',
-    created_at: now
+  const local = await blob.appendMessage(tenantId, {
+    ...data,
+    conversationId: remoteConv?.id || data.conversationId,
+    customerPhone: phone,
+    tenantId
   });
 
-  const msg = Array.isArray(inserted.data) ? inserted.data[0] : inserted.data;
-  if (!inserted.ok || !msg) {
-    return blob.appendMessage(tenantId, { ...data, conversationId: conv.id });
-  }
-
   return {
-    conversation: mapConversation(conv, tenantId),
-    message: mapMessage(msg, tenantId),
+    conversation: remoteConv ? mapConversation(remoteConv, tenantId) : local.conversation,
+    message: local.message,
     persisted: true
   };
 }
 
 async function setConversationStatus(tenantId, conversationId, status) {
-  if (!getSupabaseConfig() || !isUuid(conversationId)) {
-    return blob.setConversationStatus(tenantId, conversationId, status);
+  if (getSupabaseConfig() && isUuid(conversationId)) {
+    const result = await sbUpdate(
+      'whatsapp_conversations',
+      { id: `eq.${conversationId}`, business_id: `eq.${tenantId}` },
+      {
+        status,
+        agent_paused: status === 'HUMAN_ACTIVE',
+        updated_at: new Date().toISOString()
+      }
+    );
+    const row = Array.isArray(result.data) ? result.data[0] : result.data;
+    if (row) return mapConversation(row, tenantId);
   }
-  const result = await sbUpdate(
-    'whatsapp_conversations',
-    { id: `eq.${conversationId}`, business_id: `eq.${tenantId}` },
-    {
-      status,
-      agent_paused: status === 'HUMAN_ACTIVE',
-      updated_at: new Date().toISOString()
-    }
-  );
-  const row = Array.isArray(result.data) ? result.data[0] : result.data;
-  return mapConversation(row, tenantId);
+  return blob.setConversationStatus(tenantId, conversationId, status);
 }
 
 module.exports = {
