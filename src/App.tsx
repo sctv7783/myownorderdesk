@@ -316,6 +316,7 @@ export default function App() {
       const [
         ordersRes,
         convsRes,
+        inboxRes,
         productsRes,
         customersRes,
         notifsRes,
@@ -327,6 +328,7 @@ export default function App() {
       ] = await Promise.all([
         safeFetch('/api/orders'),
         safeFetch(`/api/conversations?tenantId=${encodeURIComponent(tenantId)}`),
+        safeFetch(`/api/inbox?tenantId=${encodeURIComponent(tenantId)}`),
         safeFetch('/api/products'),
         safeFetch('/api/customers'),
         safeFetch('/api/notifications'),
@@ -339,6 +341,10 @@ export default function App() {
 
       let loadedOrders = Array.isArray(ordersRes) ? ordersRes : (ordersRes?.orders || []);
       let loadedConvs = Array.isArray(convsRes) ? convsRes : (convsRes?.conversations || []);
+      const inboxConvs = Array.isArray(inboxRes) ? inboxRes : (inboxRes?.conversations || []);
+      if ((!loadedConvs.length || loadedConvs.length < inboxConvs.length) && inboxConvs.length) {
+        loadedConvs = inboxConvs;
+      }
       const loadedProducts = Array.isArray(productsRes) ? productsRes : (productsRes?.products || []);
       let loadedCustomers = Array.isArray(customersRes) ? customersRes : (customersRes?.customers || []);
       const loadedNotifs = Array.isArray(notifsRes) ? notifsRes : (notifsRes?.notifications || []);
@@ -433,14 +439,36 @@ export default function App() {
         const res = await fetch(`/api/conversations?tenantId=${encodeURIComponent(currentTenant.id)}`, {
           headers: authHeaders(currentTenant.id)
         });
+        if (!res.ok) {
+          const inboxRes = await fetch(`/api/inbox?tenantId=${encodeURIComponent(currentTenant.id)}`, {
+            headers: authHeaders(currentTenant.id)
+          });
+          if (!inboxRes.ok) return;
+          const inboxData = JSON.parse(await inboxRes.text());
+          const inboxList = Array.isArray(inboxData) ? inboxData : inboxData?.conversations || [];
+          if (cancelled || !Array.isArray(inboxList)) return;
+          setConversations(inboxList);
+          return;
+        }
         const raw = await res.text();
         let data: any = null;
         try {
-          data = JSON.parse(raw);
+          data = raw && !raw.trimStart().startsWith('<') ? JSON.parse(raw) : null;
         } catch {
-          return;
+          data = null;
         }
-        const list = Array.isArray(data) ? data : data?.conversations || [];
+        let list = Array.isArray(data) ? data : data?.conversations || [];
+        if (!Array.isArray(list) || !list.length) {
+          const inboxRes = await fetch(`/api/inbox?tenantId=${encodeURIComponent(currentTenant.id)}`, {
+            headers: authHeaders(currentTenant.id)
+          });
+          const inboxRaw = await inboxRes.text();
+          if (inboxRes.ok && inboxRaw && !inboxRaw.trimStart().startsWith('<')) {
+            const inboxData = JSON.parse(inboxRaw);
+            const inboxList = Array.isArray(inboxData) ? inboxData : inboxData?.conversations || [];
+            if (Array.isArray(inboxList) && inboxList.length) list = inboxList;
+          }
+        }
         if (cancelled || !Array.isArray(list)) return;
         setConversations(prev => {
           const prevStamp = prev[0]?.lastMessageAt || '';

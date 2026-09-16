@@ -336,10 +336,11 @@ async function updateOrderStatus(tenantId, orderId, status, note) {
   const orders = await listOrders(tenantId);
   const current = orders.find((order) => order.id === orderId);
   if (!current) return { ok: false, error: 'Order not found' };
+  const mergedNotes = note ? [current.notes, note].filter(Boolean).join(' | ') : current.notes;
   const next = {
     ...current,
     status,
-    notes: note || current.notes,
+    notes: mergedNotes,
     updatedAt: new Date().toISOString()
   };
   if (getSupabaseConfig() && isUuid(orderId)) {
@@ -349,7 +350,7 @@ async function updateOrderStatus(tenantId, orderId, status, note) {
       {
         status,
         order_status: String(status).toLowerCase(),
-        notes: note || current.notes,
+        notes: mergedNotes,
         updated_at: next.updatedAt
       }
     );

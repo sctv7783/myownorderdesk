@@ -1,4 +1,5 @@
 const STORE_NAME = 'whatsapp-config';
+const { getNamedStore } = require('./blobs.cjs');
 
 function tenantKey(tenantId) {
   return `tenant:${tenantId || 'default'}`;
@@ -40,13 +41,7 @@ function publicPhone(record) {
 }
 
 async function getBlobStore() {
-  try {
-    const { getStore } = require('@netlify/blobs');
-    return getStore(STORE_NAME);
-  } catch (err) {
-    console.warn('[WhatsApp Store] Blobs unavailable:', err?.message || err);
-    return null;
-  }
+  return getNamedStore(STORE_NAME);
 }
 
 const { getSupabaseConfig, isUuid, sbSelect } = require('./supabase-rest.cjs');

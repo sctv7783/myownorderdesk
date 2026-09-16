@@ -14,15 +14,20 @@ const { markMessageAsRead, sendWhatsAppText, sendWhatsAppImage } = require('../l
 const { generateAgentReply } = require('../lib/groq-agent.cjs');
 const { appendMessage } = require('../lib/conversations.cjs');
 const { getBusiness, findBusinessIdByPhone } = require('../lib/business.cjs');
-const { isUuid } = require('../lib/supabase-rest.cjs');
+const { voiceToText, mediaIdFromMessage } = require('../lib/whatsapp-voice.cjs');
 
-function incomingFromMessage(msg) {
+async function incomingFromMessage(msg, accessToken) {
   if (msg.type === 'location' && msg.location) {
     const loc = msg.location;
     return `Delivery location: ${[loc.name, loc.address].filter(Boolean).join(', ')} (lat ${loc.latitude}, lng ${loc.longitude})`.trim();
   }
   if (msg.type === 'contacts' && Array.isArray(msg.contacts)) {
     return `Customer shared contact: ${msg.contacts.map((c) => c.name?.formatted_name || '').join(', ')}`;
+  }
+  if (msg.type === 'audio' || msg.type === 'voice' || mediaIdFromMessage(msg)) {
+    const spoken = await voiceToText(msg, accessToken);
+    if (spoken) return spoken;
+    return 'Customer sent a voice note. Continue the same order/chat. Ask one short question only if you still need a product, quantity, or address.';
   }
   return (
     msg.text?.body ||
@@ -131,12 +136,12 @@ async function handleIncoming(payload) {
 
       const creds = await resolveCreds(phoneNumberId);
       const tenantId =
-        (creds?.tenantId && isUuid(creds.tenantId) && creds.tenantId) ||
+        creds?.tenantId ||
         (await findBusinessIdByPhone(phoneNumberId)) ||
-        (await findBusinessIdByPhone(creds?.phoneNumberId));
-      if (!tenantId) {
-        console.warn('[Webhook] No store mapped for WhatsApp phone', phoneNumberId);
-        continue;
+        (await findBusinessIdByPhone(creds?.phoneNumberId)) ||
+        'unmapped';
+      if (tenantId === 'unmapped') {
+        console.warn('[Webhook] No store mapped for WhatsApp phone', phoneNumberId, '- saving to WABA inbox anyway');
       }
       const stored = (await loadConfig(tenantId)) || creds;
       const token = stored?.accessToken || creds?.accessToken;
@@ -148,7 +153,7 @@ async function handleIncoming(payload) {
         const contactName =
           val.contacts?.find((c) => c.wa_id === msg.from)?.profile?.name ||
           `Customer ${senderPhone.slice(-4)}`;
-        const incomingText = incomingFromMessage(msg);
+        const incomingText = await incomingFromMessage(msg, token);
 
         if (token && phoneId) {
           markMessageAsRead({

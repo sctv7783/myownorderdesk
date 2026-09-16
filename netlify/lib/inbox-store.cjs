@@ -1,13 +1,9 @@
+const { getNamedStore } = require('./blobs.cjs');
+
 const STORE_NAME = 'orderdesk-inbox';
 
 async function getStore() {
-  try {
-    const { getStore } = require('@netlify/blobs');
-    return getStore(STORE_NAME);
-  } catch (err) {
-    console.warn('[Inbox Store] Blobs unavailable:', err?.message || err);
-    return null;
-  }
+  return getNamedStore(STORE_NAME);
 }
 
 function emptyState() {
@@ -123,20 +119,47 @@ async function listConversations(tenantId, phoneNumberId) {
   const state = await loadInbox(tenantId);
   const waba = await loadWabaInbox(phoneNumberId);
   const map = new Map();
+  const byPhone = new Map();
   for (const conv of [...(waba.conversations || []), ...(state.conversations || [])]) {
     if (!conv) continue;
-    map.set(conv.id || conv.customerPhone, conv);
+    const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+    const prev = (conv.id && map.get(conv.id)) || (phone && byPhone.get(phone));
+    const next = prev && new Date(prev.lastMessageAt || 0) > new Date(conv.lastMessageAt || 0) ? prev : conv;
+    if (next.id) map.set(next.id, next);
+    if (phone) byPhone.set(phone, next);
   }
-  return [...map.values()].sort(
+  const merged = [];
+  const seen = new Set();
+  for (const conv of [...map.values(), ...byPhone.values()]) {
+    const key = conv.id || String(conv.customerPhone || '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(conv);
+  }
+  return merged.sort(
     (a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
   );
 }
 
+function collectMessages(state, conversationId) {
+  if (state.messagesByConv[conversationId]?.length) return state.messagesByConv[conversationId];
+  const conv = (state.conversations || []).find((c) => c.id === conversationId);
+  if (!conv) return [];
+  const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+  for (const other of state.conversations || []) {
+    const otherPhone = String(other.customerPhone || '').replace(/\D/g, '');
+    if (phone && otherPhone && phone === otherPhone && state.messagesByConv[other.id]?.length) {
+      return state.messagesByConv[other.id];
+    }
+  }
+  return [];
+}
+
 async function listMessages(tenantId, conversationId, phoneNumberId) {
   const state = await loadInbox(tenantId);
-  const local = state.messagesByConv[conversationId] || [];
+  const local = collectMessages(state, conversationId);
   const waba = await loadWabaInbox(phoneNumberId);
-  const extra = waba.messagesByConv[conversationId] || [];
+  const extra = collectMessages(waba, conversationId);
   const seen = new Set();
   const merged = [];
   for (const msg of [...local, ...extra]) {

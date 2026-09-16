@@ -231,11 +231,11 @@ function catalogText(products) {
   return products
     .filter((p) => p.isActive !== false)
     .slice(0, 60)
-    .map((p) => {
+    .map((p, i) => {
       const price = p.salePrice || p.price;
-      const img = p.imageUrl ? ` | photo ${p.imageUrl}` : ' | photo none';
+      const hasPhoto = /^https?:\/\//i.test(String(p.imageUrl || ''));
       const desc = p.description ? ` | ${String(p.description).slice(0, 80)}` : '';
-      return `- id:${p.id} | ${p.name} | Rs. ${price} | stock ${p.stockQuantity} | SKU ${p.sku || '-'}${img}${desc}`;
+      return `${i + 1}) ${p.name} | Rs. ${price} | stock ${p.stockQuantity} | photo ${hasPhoto ? 'yes' : 'none'}${desc}`;
     })
     .join('\n');
 }

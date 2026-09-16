@@ -117,36 +117,36 @@ async function conversationsFromMessages(tenantId) {
 }
 
 async function listConversations(tenantId, phoneNumberId) {
-  const local = await blob.listConversations(tenantId, phoneNumberId);
-  if (!getSupabaseConfig() || !isUuid(tenantId)) return local;
-  let remoteRes = await sbSelect('whatsapp_conversations', {
-    select: '*',
-    business_id: `eq.${tenantId}`,
-    order: 'last_message_at.desc'
-  });
-  if (!remoteRes.ok) {
-    remoteRes = await sbSelect('whatsapp_conversations', {
+  const wabaId = phoneNumberId || process.env.META_PHONE_NUMBER_ID || '';
+  const local = await blob.listConversations(tenantId, wabaId);
+  if (!getSupabaseConfig()) return local;
+  const remoteChunks = [];
+  if (isUuid(tenantId)) {
+    let remoteRes = await sbSelect('whatsapp_conversations', {
       select: '*',
-      business_id: `eq.${tenantId}`
+      business_id: `eq.${tenantId}`,
+      order: 'last_message_at.desc'
     });
+    if (!remoteRes.ok) {
+      remoteRes = await sbSelect('whatsapp_conversations', {
+        select: '*',
+        business_id: `eq.${tenantId}`
+      });
+    }
+    if (remoteRes.ok) remoteChunks.push(remoteRes.rows.map((row) => mapConversation(row, tenantId)));
   }
-  let remote = remoteRes.ok ? remoteRes.rows.map((row) => mapConversation(row, tenantId)) : [];
-  if (phoneNumberId) {
+  if (wabaId) {
     const byPhone = await sbSelect('whatsapp_conversations', {
       select: '*',
-      phone_number_id: `eq.${phoneNumberId}`
+      phone_number_id: `eq.${wabaId}`
     });
     if (byPhone.ok && byPhone.rows.length) {
-      remote = mergeConversations(
-        remote,
-        byPhone.rows.map((row) => mapConversation(row, tenantId))
-      );
+      remoteChunks.push(byPhone.rows.map((row) => mapConversation(row, tenantId)));
     }
   }
-  if (!remote.length) {
-    remote = await conversationsFromMessages(tenantId);
-  }
-  return mergeConversations(remote, local);
+  let remote = remoteChunks.flat();
+  const fromMessages = isUuid(tenantId) ? await conversationsFromMessages(tenantId) : [];
+  return mergeConversations(remote, mergeConversations(fromMessages, local));
 }
 
 async function listMessages(tenantId, conversationId, phoneNumberId) {
@@ -223,6 +223,9 @@ async function appendMessage(tenantId, data) {
         }
       ]);
       remoteConv = created.row;
+      if (!remoteConv) {
+        console.warn('[Inbox] whatsapp_conversations insert failed for', tenantId, phone);
+      }
     } else {
       await sbUpdate(
         'whatsapp_conversations',

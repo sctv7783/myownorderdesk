@@ -34,6 +34,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [search, setSearch] = useState('');
   const [statusNote, setStatusNote] = useState('');
+  const [pendingChange, setPendingChange] = useState<{ orderId: string; status: OrderStatus } | null>(null);
+  const [rowNote, setRowNote] = useState('');
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  const statusOptions: OrderStatus[] = [
+    'PENDING_CONFIRMATION',
+    'CONFIRMED',
+    'PREPARING',
+    'SHIPPED',
+    'DELIVERED',
+    'CANCELLED'
+  ];
 
   const filteredOrders = orders.filter(o => {
     if (statusFilter !== 'ALL' && o.status !== statusFilter) return false;
@@ -60,8 +72,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
   const handleStatusChange = (newStatus: OrderStatus) => {
     if (!selectedOrder) return;
+    setSavingId(selectedOrder.id);
     onUpdateStatus(selectedOrder.id, newStatus, statusNote);
     setStatusNote('');
+    setSavingId(null);
+  };
+
+  const sendRowUpdate = (orderId: string, status: OrderStatus, note?: string) => {
+    setSavingId(orderId);
+    onUpdateStatus(orderId, status, note);
+    setPendingChange(null);
+    setRowNote('');
+    setSavingId(null);
   };
 
   return (
@@ -134,8 +156,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 </tr>
               ) : (
                 filteredOrders.map(order => (
+                  <React.Fragment key={order.id}>
                   <tr
-                    key={order.id}
                     onClick={() => onSelectOrder(order)}
                     className="hover:bg-slate-800/40 cursor-pointer transition-colors"
                   >
@@ -152,22 +174,27 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     <td className="py-3.5 px-4 font-semibold text-white text-xs">
                       {tenant.currency} {order.total.toLocaleString()}
                     </td>
-                    <td className="py-3.5 px-4">
-                      <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
-                        order.status === 'CONFIRMED'
-                          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                          : order.status === 'PREPARING'
-                          ? 'bg-blue-500/10 text-blue-400 border-blue-500/30'
-                          : order.status === 'SHIPPED'
-                          ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/30'
-                          : order.status === 'DELIVERED'
-                          ? 'bg-purple-500/10 text-purple-400 border-purple-500/30'
-                          : order.status === 'CANCELLED'
-                          ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
-                          : 'bg-slate-800 text-slate-400 border-slate-700'
-                      }`}>
-                        {order.status}
-                      </span>
+                    <td className="py-3.5 px-4" onClick={e => e.stopPropagation()}>
+                      <select
+                        value={pendingChange?.orderId === order.id ? pendingChange.status : order.status}
+                        disabled={savingId === order.id}
+                        onChange={e => {
+                          const next = e.target.value as OrderStatus;
+                          if (next === order.status) {
+                            setPendingChange(null);
+                            return;
+                          }
+                          setPendingChange({ orderId: order.id, status: next });
+                          setRowNote('');
+                        }}
+                        className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-[11px] text-white font-semibold focus:outline-none focus:border-emerald-500"
+                      >
+                        {statusOptions.map(st => (
+                          <option key={st} value={st}>
+                            {st}
+                          </option>
+                        ))}
+                      </select>
                     </td>
                     <td className="py-3.5 px-4 text-xs">
                       {order.source === 'whatsapp_ai' ? (
@@ -182,6 +209,39 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       {new Date(order.createdAt).toLocaleDateString()}
                     </td>
                   </tr>
+                  {pendingChange?.orderId === order.id && (
+                    <tr className="bg-emerald-950/20">
+                      <td colSpan={7} className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                        <p className="text-[11px] text-emerald-300 mb-2">
+                          Status <span className="font-semibold">{pendingChange.status}</span> customer ko WhatsApp par turant milega. Optional note add karein:
+                        </p>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <input
+                            type="text"
+                            value={rowNote}
+                            onChange={e => setRowNote(e.target.value)}
+                            placeholder="e.g. Rider Ali, ETA 30 min, tracking..."
+                            className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => sendRowUpdate(order.id, pendingChange.status, rowNote)}
+                            className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-500"
+                          >
+                            Send update
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingChange(null)}
+                            className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 ))
               )}
             </tbody>

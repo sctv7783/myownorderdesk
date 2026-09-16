@@ -1,4 +1,4 @@
-const { resolveBusinessId } = require('../lib/business.cjs');
+const { requireStoreUser } = require('../lib/session.cjs');
 const {
   listProducts,
   createProduct,
@@ -39,8 +39,9 @@ exports.handler = async function handler(event) {
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
-  const tenantId = await resolveBusinessId(event, body);
-  if (!tenantId) return json(400, { success: false, error: 'No business found. Login karke store select karein.' });
+  const session = await requireStoreUser(event, body);
+  if (!session.ok) return json(session.status, { success: false, error: session.error });
+  const tenantId = session.tenantId;
 
   const { productId, wantsAdjust } = parsePath(event);
 

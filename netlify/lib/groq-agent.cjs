@@ -8,7 +8,8 @@ const {
   applyCustomerTurn,
   formatDraftForPrompt,
   stripRepeatedGreeting,
-  searchProducts
+  searchProducts,
+  looksLikeCatalogDump
 } = require('./order-engine.cjs');
 
 function normalizePhone(phone) {
@@ -60,6 +61,9 @@ function pickProductPhotos(products, draft, text, names) {
   for (const row of searchProducts(active, text).slice(0, 3)) {
     push(row.product);
   }
+  if (!picked.length && /photo|pic|tasveer|products?|catalog|saare|all/i.test(String(text || ''))) {
+    for (const product of active.slice(0, 5)) push(product);
+  }
   return picked.slice(0, 5);
 }
 
@@ -94,6 +98,7 @@ YOU CAN AND MUST HANDLE:
 - cancel request, complaint, refund policy from FAQs
 - invoice recap, "dobara bhejo", "pic bhejo", "catalog"
 Think first: is this a continuation of Recent chat? If history exists, SAME conversation — never restart, never greet again, never ask "kaunsa product" if draft/history already has the item. Use ORDER DRAFT + history as memory.
+Voice notes are transcribed into the customer message. Treat that text as what they SAID. Never say you cannot hear, never complain about voice, never force typing unless a number/address is truly missing.
 
 Languages: English, Urdu, Roman Urdu/Hindi, Hindi, Greek, Arabic, Punjabi, mixed slang. Mirror the customer.
 If something is truly outside a shop (illegal, medical diagnosis, etc.) refuse politely and offer a product or staff instead.
@@ -232,10 +237,22 @@ async function generateAgentReply(incomingText, options = {}) {
     .map((m) => `${m.sender}: ${m.text}`)
     .join('\n');
   const continuing = Boolean(historyText || draft?.items?.length || draft?.selectedProductId);
+  const orderStep = ['QUANTITY', 'ADDRESS', 'CONFIRMATION'].includes(String(draft?.awaiting || ''));
 
-  if (engine.next === 'done' && engine.reply) {
+  if ((engine.skipGroq && engine.reply) || (engine.next === 'done' && engine.reply) || (orderStep && engine.reply)) {
     return {
-      reply: engine.reply,
+      reply: stripRepeatedGreeting(engine.reply),
+      skipped: false,
+      settings,
+      order: engine.order || null,
+      model: GROQ_MODEL,
+      images: wantsPhotos(text) ? pickProductPhotos(products, draft, text, []) : []
+    };
+  }
+
+  if (wantsPhotos(text) && /url na|without url|link mat|url nahi/i.test(text)) {
+    return {
+      reply: 'Theek hai, URLs nahi bhejunga. Photo chahiye ho to WhatsApp pe image bhej dunga.',
       skipped: false,
       settings,
       order: engine.order || null,
@@ -311,6 +328,9 @@ async function generateAgentReply(incomingText, options = {}) {
         const parsed = parseMeta(groqData.choices?.[0]?.message?.content || '');
         meta = parsed.meta || {};
         if (parsed.clean) reply = parsed.clean;
+        if (continuing && looksLikeCatalogDump(reply) && (draft?.selectedProductId || draft?.items?.length)) {
+          reply = engine.reply || `${draft.selectedProductName || 'Item'} already cart mein hai. Quantity ya address bata dein.`;
+        }
       } else {
         console.error('[Groq]', groqData.error || groqData);
       }
@@ -331,7 +351,11 @@ async function generateAgentReply(incomingText, options = {}) {
     : [];
 
   if (wantPics && !images.length) {
-    reply = `${reply}\n\nIs product ki photo catalog mein save nahi hai. Dashboard se image URL add karein.`.trim();
+    reply = stripRepeatedGreeting(reply);
+  } else if (wantPics && images.length) {
+    reply = stripRepeatedGreeting(
+      `${reply}\n\nPhotos WhatsApp pe bhej raha hoon.`.replace(/https?:\/\/\S+/gi, '')
+    );
   }
 
   return {

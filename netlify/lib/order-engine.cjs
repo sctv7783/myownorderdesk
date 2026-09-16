@@ -132,9 +132,14 @@ const QTY_WORDS = {
 };
 
 function extractQuantity(text) {
-  const raw = String(text || '').trim();
+  const raw = String(text || '')
+    .replace(/(?:product(?:\s*(?:number|no\.?|#))?|item|number|no\.?|#)\s*\d+/gi, ' ')
+    .replace(/\b\d+\s*(?:wala|wali|wale)\b/gi, ' ')
+    .trim();
   if (!raw) return null;
-  const explicit = raw.match(/(\d+)\s*(?:x|pcs?|pieces?|pair|pairs|qty|quantity|adad|dane)?/i);
+  const explicit = raw.match(
+    /(?:sirf|only|bs|just)?\s*(\d+)\s*(?:x|pcs?|pieces?|pair|pairs|qty|quantity|adad|dane|chahiye|chahiyein)?/i
+  );
   if (explicit) {
     const qty = Number(explicit[1]);
     if (qty >= 1 && qty <= 50) return qty;
@@ -194,10 +199,26 @@ function isCancel(text) {
 function isQuantityOnly(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
-  if (/^(do|teen|char|chaar|aik|ek|panch|paanch|che|das)\s*(pcs?|pieces?|adad|dane)?$/i.test(raw)) {
+  if (/^(sirf|only|bs|just)?\s*(do|teen|char|chaar|aik|ek|panch|paanch|che|das)\s*(pcs?|pieces?|adad|dane)?$/i.test(raw)) {
     return true;
   }
-  return /^\d+\s*(x|pcs?|pieces?|adad|dane|chahiye|chahiyein)?$/i.test(raw);
+  return /^(sirf|only|bs|just)?\s*\d+\s*(x|pcs?|pieces?|adad|dane|chahiye|chahiyein)?$/i.test(raw);
+}
+
+function activeCatalog(products) {
+  return (products || []).filter((p) => p.isActive !== false);
+}
+
+function resolveCatalogNumber(products, text) {
+  const raw = String(text || '');
+  const match =
+    raw.match(/(?:product(?:\s*(?:number|no\.?))?|item|number|no\.?|#)\s*(\d+)/i) ||
+    raw.match(/\b(\d+)\s*(?:wala|wali|wale)\b/i);
+  if (!match) return null;
+  const index = Number(match[1]);
+  const list = activeCatalog(products);
+  if (!index || index < 1 || index > list.length) return null;
+  return list[index - 1];
 }
 
 function looksLikeAddress(text) {
@@ -262,6 +283,8 @@ function searchProducts(products, query) {
 }
 
 function resolveProductMention(products, text) {
+  const byNumber = resolveCatalogNumber(products, text);
+  if (byNumber) return { matches: [byNumber], ambiguous: false };
   const scored = searchProducts(products, text);
   if (!scored.length) return { matches: [], ambiguous: false };
   const top = scored[0];
@@ -358,11 +381,22 @@ function maybeGreet(draft, text, reply) {
 
 function stripRepeatedGreeting(text) {
   return String(text || '')
+    .replace(/<<<META[\s\S]*?META>>>/gi, '')
+    .replace(/<<<ORDER[\s\S]*?ORDER>>>/gi, '')
+    .replace(/<send_images>[\s\S]*?(<\/send_images>|$)/gi, '')
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/Is product ki photo catalog mein save nahi hai[^\n]*/gi, '')
     .replace(/^(wa\s*)?alaikum\s*assalam[!.,\s]*/i, '')
     .replace(/assalam[- ]?o[- ]?alaikum[^\n]*/gi, '')
     .replace(/welcome to[^\n]*/gi, '')
-    .replace(/<<<ORDER[\s\S]*?ORDER>>>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function looksLikeCatalogDump(text) {
+  const t = String(text || '');
+  const numbered = (t.match(/^\s*\d+\s*[).:-]/gm) || []).length;
+  return numbered >= 6 || /quick list of our items|products available:|let me know which item/i.test(t);
 }
 
 function nextMissing(draft) {
@@ -477,7 +511,7 @@ async function applyCustomerTurn({
   }
 
   if (wantsCatalog(message)) {
-    const active = (products || []).filter((p) => p.isActive !== false).slice(0, 12);
+    const active = (products || []).filter((p) => p.isActive !== false).slice(0, 40);
     const lines = active.map((p, i) => `${i + 1}) ${p.name} — Rs. ${unitPrice(p).toLocaleString()}`);
     const reply = maybeGreet(
       draft,
@@ -700,5 +734,8 @@ module.exports = {
   searchProducts,
   stripRepeatedGreeting,
   wantsCatalog,
-  isConfirmText
+  isConfirmText,
+  looksLikeCatalogDump,
+  resolveCatalogNumber,
+  activeCatalog
 };

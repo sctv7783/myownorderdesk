@@ -1,5 +1,5 @@
 const { listConversations, listMessages, appendMessage, setConversationStatus } = require('../lib/conversations.cjs');
-const { resolveBusinessId } = require('../lib/business.cjs');
+const { requireStoreUser, secureJson } = require('../lib/session.cjs');
 const { loadConfig } = require('../lib/whatsapp-store.cjs');
 const { sendWhatsAppText } = require('../lib/meta-graph.cjs');
 
@@ -24,9 +24,9 @@ function parseBody(event) {
 async function resolvePhoneNumberId(tenantId) {
   try {
     const creds = await loadConfig(tenantId);
-    return creds?.phoneNumberId || '';
+    return creds?.phoneNumberId || process.env.META_PHONE_NUMBER_ID || '';
   } catch {
-    return '';
+    return process.env.META_PHONE_NUMBER_ID || '';
   }
 }
 
@@ -35,11 +35,9 @@ exports.handler = async function handler(event) {
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
-  const tenantId =
-    (await resolveBusinessId(event, body)) ||
-    event.queryStringParameters?.tenantId ||
-    event.queryStringParameters?.tenant_id;
-  if (!tenantId) return json(200, { conversations: [], messages: [], error: 'Store session required' });
+  const session = await requireStoreUser(event, body);
+  if (!session.ok) return secureJson(session.status, { conversations: [], messages: [], error: session.error });
+  const tenantId = session.tenantId;
 
   const path = event.path || '';
   const parts = path.split('/').filter(Boolean);
@@ -68,7 +66,7 @@ exports.handler = async function handler(event) {
 
   if (method === 'GET') {
     const conversations = await listConversations(tenantId, phoneNumberId);
-    return json(200, { conversations });
+    return json(200, { conversations, count: conversations.length, phoneNumberId: phoneNumberId || null });
   }
 
   if (method === 'POST' && wantsMessages && convId) {
