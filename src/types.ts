@@ -137,6 +137,7 @@ export interface Product {
   price: number;
   salePrice?: number;
   imageUrl?: string;
+  imageUrls?: string[];
   stockQuantity: number;
   reservedQuantity: number;
   availableQuantity: number;

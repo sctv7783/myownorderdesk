@@ -145,7 +145,10 @@ async function listConversations(tenantId, phoneNumberId) {
     }
   }
   let remote = remoteChunks.flat();
-  const fromMessages = isUuid(tenantId) ? await conversationsFromMessages(tenantId) : [];
+  const fromMessages =
+    !remote.length && !(local || []).length && isUuid(tenantId)
+      ? await conversationsFromMessages(tenantId)
+      : [];
   return mergeConversations(remote, mergeConversations(fromMessages, local));
 }
 

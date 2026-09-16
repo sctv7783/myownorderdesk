@@ -25,6 +25,7 @@ function emptyDraft() {
     selectedProductName: null,
     pendingQuantity: null,
     deliveryAddress: '',
+    customerName: '',
     paymentMethod: 'COD',
     notes: '',
     subtotal: 0,
@@ -354,7 +355,7 @@ function totals(draft, deliveryFee) {
 function formatSummary(draft, { confirmed, orderNumber } = {}) {
   const lines = (draft.items || []).map((item) => `${item.productName} × ${item.quantity}`);
   const head = confirmed
-    ? `Shukriya! 🎉 Aapka order ${orderNumber ? `#${orderNumber}` : ''} confirm ho gaya hai.`
+    ? `Shukriya${draft.customerName && !isPlaceholderName(draft.customerName) ? ` ${draft.customerName}` : ''}! 🎉 Aapka order ${orderNumber ? `#${orderNumber}` : ''} confirm ho gaya hai.`
     : 'Ji 👍\nOrder details:';
   return [
     head.trim(),
@@ -386,6 +387,8 @@ function stripRepeatedGreeting(text) {
     .replace(/<send_images>[\s\S]*?(<\/send_images>|$)/gi, '')
     .replace(/https?:\/\/\S+/gi, '')
     .replace(/Is product ki photo catalog mein save nahi hai[^\n]*/gi, '')
+    .replace(/photos?\s+whatsapp\s+pe\s+bhej\s+rah[^\n]*/gi, '')
+    .replace(/photo(s)? (bhej raha|send kar raha)[^\n]*/gi, '')
     .replace(/^(wa\s*)?alaikum\s*assalam[!.,\s]*/i, '')
     .replace(/assalam[- ]?o[- ]?alaikum[^\n]*/gi, '')
     .replace(/welcome to[^\n]*/gi, '')
@@ -399,10 +402,32 @@ function looksLikeCatalogDump(text) {
   return numbered >= 6 || /quick list of our items|products available:|let me know which item/i.test(t);
 }
 
+function isPlaceholderName(name) {
+  const n = String(name || '').trim();
+  if (!n) return true;
+  if (/^customer(\s+\d+)?$/i.test(n)) return true;
+  if (/^Customer\s+\d{2,4}$/.test(n)) return true;
+  if (/\[name\]|\{name\}/i.test(n)) return true;
+  return false;
+}
+
+function extractPersonName(text) {
+  const raw = String(text || '')
+    .replace(/^(mera naam|my name is|name is|i am|main)\s+/i, '')
+    .replace(/[.,!]+$/g, '')
+    .trim();
+  if (raw.length < 2 || raw.length > 48) return '';
+  if (extractQuantity(raw) && isQuantityOnly(raw)) return '';
+  if (looksLikeAddress(raw)) return '';
+  if (/\d{5,}/.test(raw)) return '';
+  return raw;
+}
+
 function nextMissing(draft) {
   if (!draft.items.length && !draft.selectedProductId) return 'PRODUCT';
   const qtyMissing = draft.items.some((item) => !item.quantity);
   if (!draft.items.length || qtyMissing) return 'QUANTITY';
+  if (isPlaceholderName(draft.customerName)) return 'NAME';
   if (!String(draft.deliveryAddress || '').trim()) return 'ADDRESS';
   return 'CONFIRMATION';
 }
@@ -454,6 +479,9 @@ async function applyCustomerTurn({
     Boolean(draft.greeted) ||
     (Array.isArray(history) && history.some((m) => m.sender === 'CUSTOMER'));
   if (greetedBefore) draft.greeted = true;
+  if (!isPlaceholderName(customerName) && isPlaceholderName(draft.customerName)) {
+    draft.customerName = customerName;
+  }
   const fee = Number(deliveryFee || 0);
 
   const done = (reply, extra = {}) => {
@@ -494,6 +522,8 @@ async function applyCustomerTurn({
       const hint =
         draft.awaiting === 'QUANTITY'
           ? 'Quantity kitni chahiye?'
+          : draft.awaiting === 'NAME'
+            ? 'Order se pehle aapka name bata dein.'
           : draft.awaiting === 'ADDRESS'
             ? 'Delivery address bata dein.'
             : draft.awaiting === 'CONFIRMATION'
@@ -541,7 +571,7 @@ async function applyCustomerTurn({
       return done('Order ready hai, confirm ke baad place hoga.');
     }
     const created = await createOrder(tenantId, {
-      customerName,
+      customerName: draft.customerName || customerName,
       customerPhone,
       items: draft.items,
       deliveryAddress: draft.deliveryAddress,
@@ -575,6 +605,20 @@ async function applyCustomerTurn({
 
   if (draft.awaiting === 'QUANTITY' && isConfirmText(message) && extractQuantity(message) == null) {
     return done('Ji, quantity kitni chahiye? Misal ke taur par 2 pieces.');
+  }
+
+  if (draft.awaiting === 'NAME' || (draft.items.length && isPlaceholderName(draft.customerName) && !isQuantityOnly(message))) {
+    const named = extractPersonName(message);
+    const productHit = resolveProductMention(products, message);
+    if (named && productHit.matches.length === 0) {
+      draft.customerName = named;
+      draft.awaiting = nextMissing(draft);
+      if (draft.awaiting === 'ADDRESS') {
+        return done(`Shukriya ${named}! Delivery address bata dein (ghar, gali, area, city).`);
+      }
+    } else if (draft.awaiting === 'NAME' && productHit.matches.length === 0) {
+      return done('Order book karne se pehle aapka name bata dein.');
+    }
   }
 
   const qty = extractQuantity(message);
@@ -653,6 +697,10 @@ async function applyCustomerTurn({
     return done(`Ji, ${draft.selectedProductName} ke kitne pieces chahiye?`);
   }
 
+  if (draft.awaiting === 'NAME') {
+    return done('Order book karne se pehle aapka name bata dein.');
+  }
+
   if (draft.awaiting === 'ADDRESS' && draft.items.length) {
     const listed = draft.items.map((i) => `${i.quantity}x ${i.productName}`).join(', ');
     return done(`Ji, ${listed} note kar liye. Delivery address bata dein.`);
@@ -711,6 +759,7 @@ function formatDraftForPrompt(draft) {
     {
       items: draft.items,
       selectedProductName: draft.selectedProductName,
+      customerName: draft.customerName || null,
       deliveryAddress: draft.deliveryAddress || null,
       awaiting: draft.awaiting,
       greeted: Boolean(draft.greeted),

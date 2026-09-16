@@ -439,17 +439,6 @@ export default function App() {
         const res = await fetch(`/api/conversations?tenantId=${encodeURIComponent(currentTenant.id)}`, {
           headers: authHeaders(currentTenant.id)
         });
-        if (!res.ok) {
-          const inboxRes = await fetch(`/api/inbox?tenantId=${encodeURIComponent(currentTenant.id)}`, {
-            headers: authHeaders(currentTenant.id)
-          });
-          if (!inboxRes.ok) return;
-          const inboxData = JSON.parse(await inboxRes.text());
-          const inboxList = Array.isArray(inboxData) ? inboxData : inboxData?.conversations || [];
-          if (cancelled || !Array.isArray(inboxList)) return;
-          setConversations(inboxList);
-          return;
-        }
         const raw = await res.text();
         let data: any = null;
         try {
@@ -480,22 +469,25 @@ export default function App() {
           if (prev && list.some((c: any) => c.id === prev)) return prev;
           return list[0]?.id || prev;
         });
+      } catch {
+        /* ignore poll errors */
+      }
+    };
 
-        const prodRes = await fetch('/api/products', {
-          headers: authHeaders(currentTenant.id)
-        });
-        const prodRaw = await prodRes.text();
-        if (!cancelled && prodRes.ok && prodRaw && !prodRaw.trimStart().startsWith('<')) {
-          const prodData = JSON.parse(prodRaw);
-          const productsList = Array.isArray(prodData) ? prodData : prodData?.products || [];
-          if (Array.isArray(productsList) && (productsList.length > 0 || prodData?.success)) {
-            setProducts(productsList);
-          }
-        }
+    pollInbox();
+    const timer = window.setInterval(pollInbox, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [currentTenant?.id]);
 
-        const ordersRes = await fetch('/api/orders', {
-          headers: authHeaders(currentTenant.id)
-        });
+  useEffect(() => {
+    if (!currentTenant) return;
+    let cancelled = false;
+    const loadOrdersFast = async () => {
+      try {
+        const ordersRes = await fetch('/api/orders', { headers: authHeaders(currentTenant.id) });
         const ordersRaw = await ordersRes.text();
         if (!cancelled && ordersRes.ok && ordersRaw && !ordersRaw.trimStart().startsWith('<')) {
           const ordersData = JSON.parse(ordersRaw);
@@ -503,12 +495,11 @@ export default function App() {
           if (Array.isArray(ordersList)) setOrders(ordersList);
         }
       } catch {
-        /* ignore poll errors */
+        /* ignore */
       }
     };
-
-    pollInbox();
-    const timer = window.setInterval(pollInbox, 2000);
+    loadOrdersFast();
+    const timer = window.setInterval(loadOrdersFast, 12000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);

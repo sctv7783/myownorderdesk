@@ -106,26 +106,42 @@ async function listOrderItems(orderId, tenantId) {
 }
 
 async function listOrders(tenantId) {
-  const blob = await loadBlobOrders(tenantId);
-  let remote = [];
-  if (getSupabaseConfig() && isUuid(tenantId)) {
-    const { ok, rows } = await sbSelect('orders', {
-      select: '*',
-      business_id: `eq.${tenantId}`,
-      order: 'created_at.desc'
-    });
-    if (ok) {
-      remote = await Promise.all(
-        rows.map(async (row) => {
-          const items = await listOrderItems(row.id, tenantId);
-          const parsedNotes = !items.length && row.notes ? safeParseItems(row.notes) : null;
-          return mapOrder(row, tenantId, items.length ? items : parsedNotes || []);
+  const [blob, remoteRes] = await Promise.all([
+    loadBlobOrders(tenantId),
+    getSupabaseConfig() && isUuid(tenantId)
+      ? sbSelect('orders', {
+          select: '*',
+          business_id: `eq.${tenantId}`,
+          order: 'created_at.desc',
+          limit: '80'
         })
-      );
+      : Promise.resolve({ ok: false, rows: [] })
+  ]);
+  let remote = [];
+  if (remoteRes.ok && remoteRes.rows.length) {
+    const ids = remoteRes.rows.map((row) => row.id).filter((id) => isUuid(id));
+    let itemRows = [];
+    if (ids.length) {
+      const itemsRes = await sbSelect('order_items', {
+        select: '*',
+        order_id: `in.(${ids.join(',')})`
+      });
+      if (itemsRes.ok) itemRows = itemsRes.rows || [];
     }
+    const byOrder = new Map();
+    for (const row of itemRows) {
+      const oid = row.order_id;
+      if (!byOrder.has(oid)) byOrder.set(oid, []);
+      byOrder.get(oid).push(mapItem(row, oid));
+    }
+    remote = remoteRes.rows.map((row) => {
+      const items = byOrder.get(row.id) || [];
+      const parsedNotes = !items.length && row.notes ? safeParseItems(row.notes) : null;
+      return mapOrder(row, tenantId, items.length ? items : parsedNotes || []);
+    });
   }
   const map = new Map();
-  for (const order of [...blob, ...remote]) {
+  for (const order of [...(blob || []), ...remote]) {
     if (!order?.id) continue;
     map.set(order.id, order);
   }
@@ -332,9 +348,24 @@ async function createOrder(tenantId, data) {
   return { ok: true, order: persisted, duplicate: false };
 }
 
+async function getOrder(tenantId, orderId) {
+  if (getSupabaseConfig() && isUuid(orderId)) {
+    const { rows } = await sbSelect('orders', {
+      select: '*',
+      id: `eq.${orderId}`,
+      business_id: `eq.${tenantId}`
+    });
+    if (rows[0]) {
+      const items = await listOrderItems(orderId, tenantId);
+      return mapOrder(rows[0], tenantId, items);
+    }
+  }
+  const blob = await loadBlobOrders(tenantId);
+  return blob.find((order) => order.id === orderId) || null;
+}
+
 async function updateOrderStatus(tenantId, orderId, status, note) {
-  const orders = await listOrders(tenantId);
-  const current = orders.find((order) => order.id === orderId);
+  const current = await getOrder(tenantId, orderId);
   if (!current) return { ok: false, error: 'Order not found' };
   const mergedNotes = note ? [current.notes, note].filter(Boolean).join(' | ') : current.notes;
   const next = {
@@ -372,6 +403,7 @@ async function listOrdersForPhone(tenantId, phone) {
 module.exports = {
   listOrders,
   listOrdersForPhone,
+  getOrder,
   createOrder,
   updateOrderStatus,
   findRecentDuplicate,

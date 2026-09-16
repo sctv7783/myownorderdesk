@@ -4,6 +4,7 @@ const { listMessages, setConversationStatus } = require('./conversations.cjs');
 const { listProducts, catalogText } = require('./products-store.cjs');
 const { getBusiness } = require('./business.cjs');
 const { listOrdersForPhone } = require('./orders-store.cjs');
+const { publicImageUrls } = require('./product-media.cjs');
 const {
   applyCustomerTurn,
   formatDraftForPrompt,
@@ -35,36 +36,41 @@ function publicImageUrl(url) {
 }
 
 function pickProductPhotos(products, draft, text, names) {
-  const active = (products || []).filter((p) => p.isActive !== false && publicImageUrl(p.imageUrl));
+  const active = (products || []).filter((p) => p.isActive !== false && publicImageUrls(p).length);
   const picked = [];
-  const push = (product) => {
-    if (!product || picked.some((row) => row.productId === product.id)) return;
-    const url = publicImageUrl(product.imageUrl);
-    if (!url) return;
-    picked.push({
-      productId: product.id,
-      imageUrl: url,
-      caption: `${product.name} — Rs. ${Number(product.salePrice || product.price || 0).toLocaleString()}`
+  const pushAll = (product) => {
+    if (!product) return;
+    const urls = publicImageUrls(product);
+    urls.forEach((url, index) => {
+      if (picked.some((row) => row.imageUrl === url)) return;
+      picked.push({
+        productId: product.id,
+        imageUrl: url,
+        caption:
+          index === 0
+            ? `${product.name} — Rs. ${Number(product.salePrice || product.price || 0).toLocaleString()}`
+            : `${product.name} (${index + 1}/${urls.length})`
+      });
     });
   };
 
   for (const name of names || []) {
     const hit = searchProducts(active, String(name))[0]?.product;
-    if (hit) push(hit);
+    if (hit) pushAll(hit);
   }
   if (draft?.selectedProductId) {
-    push((products || []).find((p) => p.id === draft.selectedProductId));
+    pushAll((products || []).find((p) => p.id === draft.selectedProductId));
   }
   for (const item of draft?.items || []) {
-    push((products || []).find((p) => p.id === item.productId));
+    pushAll((products || []).find((p) => p.id === item.productId));
   }
   for (const row of searchProducts(active, text).slice(0, 3)) {
-    push(row.product);
+    pushAll(row.product);
   }
   if (!picked.length && /photo|pic|tasveer|products?|catalog|saare|all/i.test(String(text || ''))) {
-    for (const product of active.slice(0, 5)) push(product);
+    for (const product of active.slice(0, 3)) pushAll(product);
   }
-  return picked.slice(0, 5);
+  return picked.slice(0, 10);
 }
 
 function parseMeta(raw) {
@@ -89,8 +95,8 @@ YOU CAN AND MUST HANDLE:
 - greetings, small talk, store name, hours, city, delivery areas
 - product search, recommend, compare, alternatives, size/color/variant
 - prices, discounts, stock, "kitne ka", "available hai?"
-- send photos when asked (META send_images) and when they send a photo, match catalog
-- quantity, cart, add/remove items, change item
+- send photos when asked. Backend sends the actual WhatsApp images. NEVER write "photo bhej raha hoon", never paste URLs, never mention META.
+- quantity, cart, customer NAME (ask before address), then full delivery address
 - delivery fee, ETA, COD / payment methods from STORE OPS
 - take full address or WhatsApp location pin
 - order summary, confirm, create (backend creates; use ENGINE_HINT numbers)
@@ -237,7 +243,7 @@ async function generateAgentReply(incomingText, options = {}) {
     .map((m) => `${m.sender}: ${m.text}`)
     .join('\n');
   const continuing = Boolean(historyText || draft?.items?.length || draft?.selectedProductId);
-  const orderStep = ['QUANTITY', 'ADDRESS', 'CONFIRMATION'].includes(String(draft?.awaiting || ''));
+  const orderStep = ['QUANTITY', 'NAME', 'ADDRESS', 'CONFIRMATION'].includes(String(draft?.awaiting || ''));
 
   if ((engine.skipGroq && engine.reply) || (engine.next === 'done' && engine.reply) || (orderStep && engine.reply)) {
     return {
@@ -252,7 +258,7 @@ async function generateAgentReply(incomingText, options = {}) {
 
   if (wantsPhotos(text) && /url na|without url|link mat|url nahi/i.test(text)) {
     return {
-      reply: 'Theek hai, URLs nahi bhejunga. Photo chahiye ho to WhatsApp pe image bhej dunga.',
+      reply: 'Theek hai, koi URL nahi. Product photos WhatsApp images ki soorat mein jayengi.',
       skipped: false,
       settings,
       order: engine.order || null,
@@ -350,12 +356,8 @@ async function generateAgentReply(incomingText, options = {}) {
     ? pickProductPhotos(products, draft, text, meta.send_images)
     : [];
 
-  if (wantPics && !images.length) {
+  if (wantPics && images.length) {
     reply = stripRepeatedGreeting(reply);
-  } else if (wantPics && images.length) {
-    reply = stripRepeatedGreeting(
-      `${reply}\n\nPhotos WhatsApp pe bhej raha hoon.`.replace(/https?:\/\/\S+/gi, '')
-    );
   }
 
   return {

@@ -28,7 +28,7 @@ function fileToCompressedDataUrl(file: File): Promise<string> {
       img.onerror = () => reject(new Error('Invalid image file'));
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const max = 900;
+        const max = 1100;
         const scale = Math.min(1, max / Math.max(img.width, img.height));
         canvas.width = Math.max(1, Math.round(img.width * scale));
         canvas.height = Math.max(1, Math.round(img.height * scale));
@@ -38,7 +38,18 @@ function fileToCompressedDataUrl(file: File): Promise<string> {
           return;
         }
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', 0.72));
+        const tryFormat = (type: string, quality: number) => canvas.toDataURL(type, quality);
+        let dataUrl = tryFormat('image/webp', 0.72);
+        if (!dataUrl.startsWith('data:image/webp')) dataUrl = tryFormat('image/jpeg', 0.72);
+        const bytes = (value: string) => Math.ceil((value.length - value.indexOf(',') - 1) * 0.75);
+        let quality = 0.7;
+        while (bytes(dataUrl) > 450000 && quality > 0.42) {
+          quality -= 0.08;
+          dataUrl = dataUrl.startsWith('data:image/webp')
+            ? tryFormat('image/webp', quality)
+            : tryFormat('image/jpeg', quality);
+        }
+        resolve(dataUrl);
       };
       img.src = String(reader.result);
     };
@@ -46,18 +57,22 @@ function fileToCompressedDataUrl(file: File): Promise<string> {
   });
 }
 
-const ProductImageField: React.FC<{
-  value: string;
-  onChange: (value: string) => void;
-}> = ({ value, onChange }) => {
+const ProductImagesField: React.FC<{
+  values: string[];
+  onChange: (values: string[]) => void;
+}> = ({ values, onChange }) => {
   const [busy, setBusy] = useState(false);
+  const photos = values.filter(Boolean).slice(0, 8);
 
-  const onFile = async (file?: File | null) => {
-    if (!file) return;
+  const onFiles = async (files?: FileList | null) => {
+    if (!files?.length) return;
     setBusy(true);
     try {
-      const dataUrl = await fileToCompressedDataUrl(file);
-      onChange(dataUrl);
+      const next = [...photos];
+      for (const file of Array.from(files).slice(0, 8 - next.length)) {
+        next.push(await fileToCompressedDataUrl(file));
+      }
+      onChange(next);
     } catch (err) {
       console.error(err);
     } finally {
@@ -67,35 +82,49 @@ const ProductImageField: React.FC<{
 
   return (
     <div className="space-y-2">
-      <label className="block text-slate-400 mb-1 font-medium">Product Image</label>
+      <label className="block text-slate-400 mb-1 font-medium">Product photos (multiple)</label>
       <label className="flex items-center justify-center gap-2 w-full cursor-pointer bg-slate-800 hover:bg-slate-700 border border-dashed border-slate-600 rounded-xl px-3 py-3 text-slate-200">
         {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4 text-emerald-400" />}
-        <span>{busy ? 'Compressing photo…' : 'Upload from phone / PC / laptop'}</span>
+        <span>{busy ? 'Compressing to ~300–500KB…' : 'Add photos (gallery / camera)'}</span>
         <input
           type="file"
           accept="image/*"
+          multiple
           capture="environment"
           className="hidden"
-          onChange={e => onFile(e.target.files?.[0])}
+          onChange={e => onFiles(e.target.files)}
         />
       </label>
       <input
         type="text"
-        placeholder="Or paste an image link (optional)"
-        value={value.startsWith('data:') ? '' : value}
-        onChange={e => onChange(e.target.value)}
+        placeholder="Or paste an image link and press Enter"
+        onKeyDown={e => {
+          if (e.key !== 'Enter') return;
+          const value = (e.target as HTMLInputElement).value.trim();
+          if (!value) return;
+          onChange([...photos, value].slice(0, 8));
+          (e.target as HTMLInputElement).value = '';
+        }}
         className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-emerald-500"
       />
-      {value ? (
-        <div className="flex items-center gap-3">
-          <img src={value} alt="Product preview" className="w-16 h-16 rounded-xl object-cover border border-slate-700" />
-          <button type="button" onClick={() => onChange('')} className="text-rose-400 text-[11px]">
-            Remove image
-          </button>
+      {photos.length ? (
+        <div className="flex flex-wrap gap-2">
+          {photos.map((src, index) => (
+            <div key={`${src.slice(0, 24)}-${index}`} className="relative">
+              <img src={src} alt={`Product ${index + 1}`} className="w-16 h-16 rounded-xl object-cover border border-slate-700" />
+              <button
+                type="button"
+                onClick={() => onChange(photos.filter((_, i) => i !== index))}
+                className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-rose-600 text-white text-[10px]"
+              >
+                ×
+              </button>
+            </div>
+          ))}
         </div>
       ) : (
         <p className="text-[11px] text-slate-500 flex items-center gap-1">
-          <ImagePlus className="w-3 h-3" /> Gallery, camera, or files se photo choose karein.
+          <ImagePlus className="w-3 h-3" /> Ek se zyada photos add karein — compress ho kar Supabase pe jayengi.
         </p>
       )}
     </div>
@@ -137,7 +166,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   const [newStock, setNewStock] = useState<number>(30);
   const [newLowStock, setNewLowStock] = useState<number>(5);
   const [newCategory, setNewCategory] = useState('General');
-  const [newImageUrl, setNewImageUrl] = useState('');
+  const [newImageUrls, setNewImageUrls] = useState<string[]>([]);
   const [newDesc, setNewDesc] = useState('');
 
   // Edit product form state
@@ -148,7 +177,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
   const [editStock, setEditStock] = useState<number>(0);
   const [editLowStock, setEditLowStock] = useState<number>(5);
   const [editCategory, setEditCategory] = useState('');
-  const [editImageUrl, setEditImageUrl] = useState('');
+  const [editImageUrls, setEditImageUrls] = useState<string[]>([]);
   const [editDesc, setEditDesc] = useState('');
   const [editIsActive, setEditIsActive] = useState<boolean>(true);
   const [isUpdating, setIsUpdating] = useState(false);
@@ -180,7 +209,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
     setEditStock(p.stockQuantity);
     setEditLowStock(p.lowStockThreshold || 5);
     setEditCategory(p.categoryName || 'General');
-    setEditImageUrl(p.imageUrl || '');
+    setEditImageUrls(p.imageUrls?.length ? p.imageUrls : p.imageUrl ? [p.imageUrl] : []);
     setEditDesc(p.description || '');
     setEditIsActive(p.isActive !== undefined ? p.isActive : true);
   };
@@ -197,7 +226,8 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
       stockQuantity: Number(newStock),
       lowStockThreshold: Number(newLowStock),
       categoryName: newCategory.trim() || 'General',
-      imageUrl: newImageUrl.trim() || undefined,
+      imageUrl: newImageUrls[0],
+      imageUrls: newImageUrls,
       description: newDesc.trim()
     });
 
@@ -208,7 +238,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
     setNewSalePrice('');
     setNewStock(30);
     setNewDesc('');
-    setNewImageUrl('');
+    setNewImageUrls([]);
   };
 
   const handleEditSubmit = async (e: React.FormEvent) => {
@@ -225,7 +255,8 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
         stockQuantity: Number(editStock),
         lowStockThreshold: Number(editLowStock),
         categoryName: editCategory.trim() || 'General',
-        imageUrl: editImageUrl.trim() || undefined,
+        imageUrl: editImageUrls[0],
+        imageUrls: editImageUrls,
         description: editDesc.trim(),
         isActive: editIsActive
       });
@@ -359,9 +390,9 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                     <tr key={prod.id} className="hover:bg-slate-800/40 transition-colors">
                       <td className="py-3 px-4">
                         <div className="flex items-center space-x-3">
-                          {prod.imageUrl ? (
+                          {(prod.imageUrls?.[0] || prod.imageUrl) ? (
                             <img
-                              src={prod.imageUrl}
+                              src={prod.imageUrls?.[0] || prod.imageUrl}
                               alt={prod.name}
                               referrerPolicy="no-referrer"
                               className="w-11 h-11 rounded-xl object-cover border border-slate-700 shrink-0 bg-slate-800"
@@ -694,7 +725,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                 </div>
               </div>
 
-              <ProductImageField value={editImageUrl} onChange={setEditImageUrl} />
+              <ProductImagesField values={editImageUrls} onChange={setEditImageUrls} />
 
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Description (Used by Groq AI Agent)</label>
@@ -843,7 +874,7 @@ export const ProductsView: React.FC<ProductsViewProps> = ({
                 </div>
               </div>
 
-              <ProductImageField value={newImageUrl} onChange={setNewImageUrl} />
+              <ProductImagesField values={newImageUrls} onChange={setNewImageUrls} />
 
               <div>
                 <label className="block text-slate-400 mb-1 font-medium">Product Description (Used by AI)</label>

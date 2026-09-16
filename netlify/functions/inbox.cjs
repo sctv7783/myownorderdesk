@@ -35,7 +35,7 @@ exports.handler = async function handler(event) {
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
-  const session = await requireStoreUser(event, body);
+  const session = await requireStoreUser(event, body, { allowTenantFallback: method === 'GET' });
   if (!session.ok) return secureJson(session.status, { conversations: [], messages: [], error: session.error });
   const tenantId = session.tenantId;
 

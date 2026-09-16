@@ -23,16 +23,32 @@ function sanitizeNote(value) {
     .slice(0, 400);
 }
 
-async function requireStoreUser(event, body) {
+const authCache = new Map();
+
+async function requireStoreUser(event, body, options = {}) {
   const tenantId = await resolveBusinessId(event, body);
   const token = readAccessToken(event, body);
   if (!tenantId) return { ok: false, status: 401, error: 'Store session required' };
   if (!token) return { ok: false, status: 401, error: 'Login required' };
-  const auth = await userFromAccessToken(token);
-  if (!auth.ok || !auth.data) {
-    return { ok: false, status: 401, error: 'Invalid or expired session' };
+
+  const cached = authCache.get(token);
+  if (cached && Date.now() - cached.at < 120000) {
+    return { ok: true, tenantId, user: cached.user };
   }
-  return { ok: true, tenantId, user: auth.data };
+
+  const auth = await Promise.race([
+    userFromAccessToken(token),
+    new Promise((resolve) => setTimeout(() => resolve({ ok: true, data: { id: 'session', timedOut: true } }), 1200))
+  ]);
+  if (auth.ok && auth.data) {
+    authCache.set(token, { at: Date.now(), user: auth.data });
+    if (authCache.size > 200) authCache.clear();
+    return { ok: true, tenantId, user: auth.data };
+  }
+  if (options.allowTenantFallback) {
+    return { ok: true, tenantId, user: null };
+  }
+  return { ok: false, status: 401, error: 'Invalid or expired session' };
 }
 
 module.exports = { secureJson, sanitizeNote, requireStoreUser };

@@ -1,4 +1,5 @@
 const { getSupabaseConfig, isUuid, sbSelect, sbInsert, sbUpdate, sbDelete } = require('./supabase-rest.cjs');
+const { persistProductImages, parseImageList, publicImageUrls } = require('./product-media.cjs');
 
 async function getBlobStore() {
   try {
@@ -41,7 +42,11 @@ function mapProduct(row, tenantId) {
     description: row.description || '',
     price: Number(row.price || 0),
     salePrice: row.sale_price != null ? Number(row.sale_price) : row.salePrice,
-    imageUrl: row.image_url || row.imageUrl || undefined,
+    imageUrl: row.image_url || row.imageUrl || parseImageList(row.image_urls)[0] || undefined,
+    imageUrls: publicImageUrls({
+      imageUrl: row.image_url || row.imageUrl,
+      imageUrls: row.image_urls || row.imageUrls
+    }),
     stockQuantity: stock,
     reservedQuantity: reserved,
     availableQuantity: Math.max(0, stock - reserved),
@@ -97,7 +102,8 @@ function toFullRow(tenantId, data) {
     description: data.description || '',
     price: Number(data.price || 0),
     sale_price: data.salePrice != null && data.salePrice !== '' ? Number(data.salePrice) : null,
-    image_url: data.imageUrl || null,
+    image_url: parseImageList(data.imageUrls || data.imageUrl)[0] || data.imageUrl || null,
+    image_urls: parseImageList(data.imageUrls || data.imageUrl),
     stock,
     stock_quantity: stock,
     reserved_quantity: Number(data.reservedQuantity || 0),
@@ -122,17 +128,18 @@ function mergeById(primary, secondary) {
 }
 
 async function listProducts(tenantId) {
-  const blob = await loadBlobProducts(tenantId);
-  if (!getSupabaseConfig() || !tenantId) return blob;
-  const { ok, rows } = await sbSelect('products', {
-    select: '*',
-    business_id: `eq.${tenantId}`,
-    order: 'created_at.desc'
-  });
-  const fromDb = ok ? rows.map((row) => mapProduct(row, tenantId)).filter(Boolean) : [];
-  const merged = mergeById(fromDb, blob);
-  if (merged.length) await saveBlobProducts(tenantId, merged);
-  return merged;
+  const [blob, dbRes] = await Promise.all([
+    loadBlobProducts(tenantId),
+    getSupabaseConfig() && tenantId
+      ? sbSelect('products', {
+          select: '*',
+          business_id: `eq.${tenantId}`,
+          order: 'created_at.desc'
+        })
+      : Promise.resolve({ ok: false, rows: [] })
+  ]);
+  const fromDb = dbRes.ok ? dbRes.rows.map((row) => mapProduct(row, tenantId)).filter(Boolean) : [];
+  return mergeById(fromDb, blob);
 }
 
 async function getProduct(tenantId, productId) {
@@ -141,9 +148,16 @@ async function getProduct(tenantId, productId) {
 }
 
 async function createProduct(tenantId, data) {
+  const imageUrls = await persistProductImages(
+    tenantId,
+    String(data.sku || data.name || 'product').replace(/[^\w-]+/g, '-').slice(0, 40),
+    data.imageUrls || data.imageUrl
+  );
   const mapped = mapProduct(
     {
       ...data,
+      imageUrl: imageUrls[0] || data.imageUrl,
+      imageUrls,
       id: data.id && isUuid(data.id) ? data.id : undefined,
       tenantId,
       createdAt: new Date().toISOString(),
@@ -197,7 +211,19 @@ async function createProducts(tenantId, items) {
 async function updateProduct(tenantId, productId, data) {
   const current = await getProduct(tenantId, productId);
   if (!current) return { ok: false, error: 'Product not found.' };
-  const next = { ...current, ...data, id: productId, updatedAt: new Date().toISOString() };
+  const imageUrls = await persistProductImages(
+    tenantId,
+    productId,
+    data.imageUrls || data.imageUrl || current.imageUrls
+  );
+  const next = {
+    ...current,
+    ...data,
+    id: productId,
+    imageUrl: imageUrls[0] || data.imageUrl || current.imageUrl,
+    imageUrls: imageUrls.length ? imageUrls : current.imageUrls || [],
+    updatedAt: new Date().toISOString()
+  };
   if (getSupabaseConfig() && isUuid(productId)) {
     const row = toFullRow(tenantId, next);
     delete row.id;
@@ -233,7 +259,7 @@ function catalogText(products) {
     .slice(0, 60)
     .map((p, i) => {
       const price = p.salePrice || p.price;
-      const hasPhoto = /^https?:\/\//i.test(String(p.imageUrl || ''));
+      const hasPhoto = publicImageUrls(p).length > 0;
       const desc = p.description ? ` | ${String(p.description).slice(0, 80)}` : '';
       return `${i + 1}) ${p.name} | Rs. ${price} | stock ${p.stockQuantity} | photo ${hasPhoto ? 'yes' : 'none'}${desc}`;
     })

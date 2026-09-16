@@ -452,6 +452,7 @@ SELECT orderdesk_add_column('products', 'description', 'TEXT DEFAULT ''''');
 SELECT orderdesk_add_column('products', 'price', 'NUMERIC(12,2) DEFAULT 0');
 SELECT orderdesk_add_column('products', 'sale_price', 'NUMERIC(12,2)');
 SELECT orderdesk_add_column('products', 'image_url', 'TEXT');
+SELECT orderdesk_add_column('products', 'image_urls', 'JSONB DEFAULT ''[]''::JSONB');
 SELECT orderdesk_add_column('products', 'stock', 'INT DEFAULT 0');
 SELECT orderdesk_add_column('products', 'stock_quantity', 'INT');
 SELECT orderdesk_add_column('products', 'reserved_quantity', 'INT DEFAULT 0');
