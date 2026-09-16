@@ -186,7 +186,7 @@
 
 [[redirects]]
   from = "/api/conversations/*"
-  to = "/.netlify/functions/inbox"
+  to = "/.netlify/functions/inbox/:splat"
   status = 200
   force = true
 
@@ -204,7 +204,7 @@
 
 [[redirects]]
   from = "/api/inbox/*"
-  to = "/.netlify/functions/inbox"
+  to = "/.netlify/functions/inbox/:splat"
   status = 200
   force = true
 
@@ -222,7 +222,7 @@
 
 [[redirects]]
   from = "/api/chats/*"
-  to = "/.netlify/functions/chats"
+  to = "/.netlify/functions/chats/:splat"
   status = 200
   force = true
 

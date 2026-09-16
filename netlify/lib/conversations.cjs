@@ -39,7 +39,9 @@ function mapMessage(row, tenantId) {
     conversationId: row.conversation_id,
     tenantId: row.business_id || tenantId,
     sender,
-    text: row.text || row.content || '',
+    text: row.text || row.content || row.body || '',
+    mediaUrl: row.media_url || row.mediaUrl || '',
+    mediaType: row.media_type || row.mediaType || 'text',
     whatsappMessageId: row.whatsapp_message_id || undefined,
     status: (row.status || 'DELIVERED').toUpperCase(),
     createdAt: row.created_at
@@ -79,14 +81,23 @@ async function insertVariants(table, variants) {
   return { ok: false, row: null };
 }
 
-async function conversationsFromMessages(tenantId) {
+async function conversationsFromMessages(tenantId, phoneNumberId) {
   const query = {
     select: '*',
     order: 'created_at.desc',
-    limit: '200'
+    limit: '300'
   };
   if (tenantId && isUuid(tenantId)) query.business_id = `eq.${tenantId}`;
-  const { ok, rows } = await sbSelect('whatsapp_messages', query);
+  let { ok, rows } = await sbSelect('whatsapp_messages', query);
+  if (!ok || !rows.length) {
+    const any = await sbSelect('whatsapp_messages', {
+      select: '*',
+      order: 'created_at.desc',
+      limit: '200'
+    });
+    ok = any.ok;
+    rows = any.rows || [];
+  }
   if (!ok || !rows.length) return [];
   const byConv = new Map();
   for (const row of rows) {
@@ -152,32 +163,51 @@ async function listConversations(tenantId, phoneNumberId) {
       remote = any.rows.map((row) => mapConversation(row, tenantId));
     }
   }
-  const fromMessages =
-    !remote.length && !(local || []).length
-      ? await conversationsFromMessages(isUuid(tenantId) ? tenantId : '')
-      : [];
+  const fromMessages = await conversationsFromMessages(isUuid(tenantId) ? tenantId : '', wabaId);
   return mergeConversations(remote, mergeConversations(fromMessages, local));
 }
 
 async function listMessages(tenantId, conversationId, phoneNumberId) {
   const local = await blob.listMessages(tenantId, conversationId, phoneNumberId);
   if (!getSupabaseConfig()) return local;
+  let remote = [];
   if (isUuid(conversationId)) {
     const { ok, rows } = await sbSelect('whatsapp_messages', {
       select: '*',
       conversation_id: `eq.${conversationId}`,
       order: 'created_at.asc'
     });
-    if (ok && rows.length) {
-      const remote = rows.map((row) => mapMessage(row, tenantId));
-      const seen = new Set(remote.map((m) => m.whatsappMessageId || `${m.sender}:${m.text}:${m.createdAt}`));
-      const extras = local.filter((m) => !seen.has(m.whatsappMessageId || `${m.sender}:${m.text}:${m.createdAt}`));
-      return [...remote, ...extras].sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-      );
+    if (ok) remote = rows.map((row) => mapMessage(row, tenantId));
+  }
+  const convs = await listConversations(tenantId, phoneNumberId);
+  const conv = convs.find((c) => c.id === conversationId);
+  const phone = String(conv?.customerPhone || '').replace(/\D/g, '');
+  if (phone) {
+    const allConvs = await sbSelect('whatsapp_conversations', { select: '*', limit: '200' });
+    const ids = (allConvs.rows || [])
+      .filter((row) => String(row.customer_phone || '').replace(/\D/g, '') === phone)
+      .map((row) => row.id)
+      .filter(isUuid);
+    for (const id of ids.slice(0, 5)) {
+      if (id === conversationId) continue;
+      const extra = await sbSelect('whatsapp_messages', {
+        select: '*',
+        conversation_id: `eq.${id}`,
+        order: 'created_at.asc'
+      });
+      if (extra.ok) remote.push(...extra.rows.map((row) => mapMessage(row, tenantId)));
     }
   }
-  return local;
+  const seen = new Set();
+  const merged = [];
+  for (const msg of [...remote, ...local]) {
+    if (!msg) continue;
+    const key = msg.whatsappMessageId || msg.id || `${msg.sender}:${msg.text}:${msg.createdAt}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(msg);
+  }
+  return merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 }
 
 async function findConversation(tenantId, { conversationId, customerPhone }) {
@@ -210,7 +240,8 @@ async function appendMessage(tenantId, data) {
   const phone = displayPhone(data.customerPhone);
 
   let remoteConv = null;
-  if (getSupabaseConfig() && isUuid(tenantId)) {
+  const canRemote = Boolean(getSupabaseConfig() && (isUuid(tenantId) || phone));
+  if (canRemote && isUuid(tenantId)) {
     remoteConv = await findConversation(tenantId, { ...data, customerPhone: phone });
     if (!remoteConv) {
       const created = await insertVariants('whatsapp_conversations', [
@@ -258,9 +289,11 @@ async function appendMessage(tenantId, data) {
           conversation_id: remoteConv.id,
           direction,
           sender,
-          message_type: 'text',
+          message_type: data.mediaType || 'text',
           content: text,
           text,
+          media_url: data.mediaUrl || null,
+          media_type: data.mediaType || 'text',
           whatsapp_message_id: data.whatsappMessageId || null,
           status: data.status || 'DELIVERED',
           created_at: now
@@ -268,7 +301,20 @@ async function appendMessage(tenantId, data) {
         {
           conversation_id: remoteConv.id,
           direction,
+          sender,
           content: text,
+          text,
+          created_at: now
+        },
+        {
+          conversation_id: remoteConv.id,
+          direction,
+          content: text,
+          created_at: now
+        },
+        {
+          conversation_id: remoteConv.id,
+          body: text,
           created_at: now
         }
       ]);

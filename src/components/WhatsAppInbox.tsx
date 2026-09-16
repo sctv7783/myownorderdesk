@@ -1,20 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Search,
   Bot,
   User,
   Send,
   CheckCheck,
-  Phone,
-  Calendar,
-  DollarSign,
-  Package,
   Sparkles,
   UserCheck,
   RotateCcw,
-  Shield,
-  MessageCircle,
-  Tag
+  Paperclip,
+  Mic,
+  Image as ImageIcon
 } from 'lucide-react';
 import { Conversation, ConversationMessage, Customer, Order, Tenant } from '../types';
 
@@ -26,7 +22,7 @@ interface WhatsAppInboxProps {
   messages: ConversationMessage[];
   currentCustomer: Customer | null;
   customerOrders: Order[];
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, media?: { mediaUrl: string; mediaType: string }) => void;
   onToggleMode: (newStatus: Conversation['status']) => void;
   isSending: boolean;
 }
@@ -46,8 +42,18 @@ export const WhatsAppInbox: React.FC<WhatsAppInboxProps> = ({
   const [filter, setFilter] = useState<'ALL' | 'AI_ACTIVE' | 'HUMAN_ACTIVE'>('ALL');
   const [search, setSearch] = useState('');
   const [replyText, setReplyText] = useState('');
+  const [pendingFile, setPendingFile] = useState<{ name: string; mediaUrl: string; mediaType: string } | null>(null);
+  const [recording, setRecording] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
 
   const selectedConv = conversations.find(c => c.id === selectedConvId) || conversations[0];
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages.length, selectedConvId]);
 
   const filteredConversations = conversations.filter(c => {
     if (filter === 'AI_ACTIVE' && c.status !== 'AI_ACTIVE') return false;
@@ -63,17 +69,65 @@ export const WhatsAppInbox: React.FC<WhatsAppInboxProps> = ({
     return true;
   });
 
-  const handleSend = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!replyText.trim() || isSending) return;
-    onSendMessage(replyText.trim());
+  const readFile = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const attachFile = async (file?: File | null) => {
+    if (!file) return;
+    const mediaUrl = await readFile(file);
+    const mediaType = file.type.startsWith('video')
+      ? 'video'
+      : file.type.startsWith('audio')
+        ? 'audio'
+        : 'image';
+    setPendingFile({ name: file.name, mediaUrl, mediaType });
+  };
+
+  const handleSend = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (isSending) return;
+    if (!replyText.trim() && !pendingFile) return;
+    await onSendMessage(replyText.trim(), pendingFile || undefined);
     setReplyText('');
+    setPendingFile(null);
+  };
+
+  const toggleVoice = async () => {
+    if (recording && recorderRef.current) {
+      recorderRef.current.stop();
+      setRecording(false);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      chunksRef.current = [];
+      recorder.ondataavailable = (ev) => {
+        if (ev.data.size) chunksRef.current.push(ev.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        const file = new File([blob], 'voice.webm', { type: blob.type });
+        await attachFile(file);
+      };
+      recorderRef.current = recorder;
+      recorder.start();
+      setRecording(true);
+    } catch (err) {
+      console.warn('Microphone unavailable', err);
+    }
   };
 
   return (
-    <div className="h-[calc(100vh-8.5rem)] bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl flex">
+    <div className="h-[calc(100vh-8.5rem)] bg-[#111b21] border border-slate-800 rounded-2xl overflow-hidden shadow-xl flex">
       {/* LEFT COLUMN: Conversation List */}
-      <div className="w-80 border-r border-slate-800 flex flex-col bg-slate-900/90 shrink-0">
+      <div className="w-80 border-r border-[#2a3942] flex flex-col bg-[#111b21] shrink-0">
         <div className="p-3 border-b border-slate-800">
           <div className="relative mb-2">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
@@ -160,26 +214,23 @@ export const WhatsAppInbox: React.FC<WhatsAppInboxProps> = ({
 
       {/* CENTER COLUMN: WhatsApp Chat Window */}
       {selectedConv ? (
-        <div className="flex-1 flex flex-col bg-slate-950">
-          {/* Header */}
-          <div className="h-14 px-4 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+        <div className="flex-1 flex flex-col bg-[#0b141a]">
+          <div className="h-14 px-4 bg-[#202c33] border-b border-[#2a3942] flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="w-9 h-9 rounded-full bg-slate-700 flex items-center justify-center font-bold text-xs text-white">
+              <div className="w-9 h-9 rounded-full bg-[#6a7175] flex items-center justify-center font-bold text-xs text-white">
                 {selectedConv.customerName.slice(0, 2).toUpperCase()}
               </div>
               <div>
-                <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+                <h3 className="text-sm font-semibold text-[#e9edef] flex items-center space-x-2">
                   <span>{selectedConv.customerName}</span>
-                  <span className="text-xs font-mono font-normal text-slate-400">({selectedConv.customerPhone})</span>
+                  <span className="text-xs font-mono font-normal text-[#8696a0]">({selectedConv.customerPhone})</span>
                 </h3>
-                <p className="text-[11px] text-emerald-400 flex items-center">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mr-1.5" />
-                  Meta WhatsApp Cloud API Connected
+                <p className="text-[11px] text-[#00a884] flex items-center">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#00a884] mr-1.5" />
+                  WhatsApp Cloud API
                 </p>
               </div>
             </div>
-
-            {/* Mode Toggle Controls */}
             <div className="flex items-center space-x-2">
               {selectedConv.status === 'AI_ACTIVE' ? (
                 <button
@@ -187,7 +238,7 @@ export const WhatsAppInbox: React.FC<WhatsAppInboxProps> = ({
                   className="flex items-center space-x-1.5 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/40 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
                 >
                   <UserCheck className="w-3.5 h-3.5" />
-                  <span>Take Over (Handoff to Human)</span>
+                  <span>Take Over</span>
                 </button>
               ) : (
                 <button
@@ -195,30 +246,35 @@ export const WhatsAppInbox: React.FC<WhatsAppInboxProps> = ({
                   className="flex items-center space-x-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Resume Groq AI Agent</span>
+                  <span>Resume AI</span>
                 </button>
               )}
             </div>
           </div>
 
-          {/* Messages Feed */}
-          <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:16px_16px]">
-            {/* Banner for Mode status */}
+          <div
+            className="flex-1 p-4 overflow-y-auto space-y-1.5"
+            style={{
+              backgroundColor: '#0b141a',
+              backgroundImage:
+                'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'0.03\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")'
+            }}
+          >
             <div className="text-center my-2">
-              <span className={`inline-flex items-center space-x-1.5 px-3 py-1 rounded-full text-[11px] font-medium border ${
+              <span className={`inline-flex items-center space-x-1.5 px-3 py-1 rounded-full text-[11px] font-medium ${
                 selectedConv.status === 'AI_ACTIVE'
-                  ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800'
-                  : 'bg-amber-950/60 text-amber-300 border-amber-800'
+                  ? 'bg-[#182229] text-[#8696a0]'
+                  : 'bg-amber-950/60 text-amber-300'
               }`}>
                 {selectedConv.status === 'AI_ACTIVE' ? (
                   <>
-                    <Sparkles className="w-3 h-3 text-emerald-400" />
-                    <span>AI Agent Active (Model: {tenant.businessType} Groq openai/gpt-oss-20b)</span>
+                    <Sparkles className="w-3 h-3 text-[#00a884]" />
+                    <span>AI agent active</span>
                   </>
                 ) : (
                   <>
-                    <User className="w-3 h-3 text-amber-400" />
-                    <span>Human Mode Active — AI auto-replies are paused</span>
+                    <User className="w-3 h-3" />
+                    <span>Human mode — AI paused</span>
                   </>
                 )}
               </span>
@@ -226,57 +282,95 @@ export const WhatsAppInbox: React.FC<WhatsAppInboxProps> = ({
 
             {messages.map(msg => {
               const isCustomer = msg.sender === 'CUSTOMER';
+              const mediaType = String(msg.mediaType || '').toLowerCase();
+              const mediaUrl = msg.mediaUrl || '';
               return (
                 <div
                   key={msg.id}
                   className={`flex ${isCustomer ? 'justify-start' : 'justify-end'}`}
                 >
                   <div
-                    className={`max-w-[75%] rounded-2xl px-4 py-2.5 shadow-md text-sm ${
+                    className={`max-w-[75%] rounded-lg px-2 py-1.5 shadow text-sm ${
                       isCustomer
-                        ? 'bg-slate-800 text-slate-100 rounded-tl-none border border-slate-700/60'
-                        : msg.sender === 'AI'
-                        ? 'bg-emerald-800/90 text-white rounded-tr-none border border-emerald-700'
-                        : 'bg-blue-700 text-white rounded-tr-none border border-blue-600'
+                        ? 'bg-[#202c33] text-[#e9edef] rounded-tl-none'
+                        : 'bg-[#005c4b] text-[#e9edef] rounded-tr-none'
                     }`}
                   >
-                    <div className="flex items-center justify-between text-[10px] opacity-75 mb-1 space-x-2">
-                      <span className="font-bold uppercase tracking-wider">
-                        {msg.sender === 'CUSTOMER' ? selectedConv.customerName : msg.sender === 'AI' ? 'Groq AI Agent' : 'Staff Reply'}
+                    <div className="flex items-center justify-between text-[10px] text-[#8696a0] mb-1 space-x-2">
+                      <span>
+                        {msg.sender === 'CUSTOMER' ? selectedConv.customerName : msg.sender === 'AI' ? 'AI' : 'You'}
                       </span>
                       <span>{new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                     </div>
-
-                    <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
-
+                    {mediaUrl && mediaType.startsWith('image') && (
+                      <img src={mediaUrl} alt={msg.text || 'Photo'} className="max-w-[240px] rounded-md mb-1" />
+                    )}
+                    {mediaUrl && mediaType.startsWith('video') && (
+                      <video src={mediaUrl} controls className="max-w-[240px] rounded-md mb-1" />
+                    )}
+                    {mediaUrl && mediaType.startsWith('audio') && (
+                      <audio src={mediaUrl} controls className="w-[220px] mb-1" />
+                    )}
+                    {msg.text && <p className="whitespace-pre-wrap leading-relaxed px-1">{msg.text}</p>}
                     {!isCustomer && (
-                      <div className="flex justify-end mt-1">
-                        <CheckCheck className="w-3.5 h-3.5 text-emerald-300 opacity-90" />
+                      <div className="flex justify-end mt-0.5">
+                        <CheckCheck className="w-3.5 h-3.5 text-[#53bdeb]" />
                       </div>
                     )}
                   </div>
                 </div>
               );
             })}
+            <div ref={bottomRef} />
           </div>
 
-          {/* Input Box */}
-          <form onSubmit={handleSend} className="p-3 bg-slate-900 border-t border-slate-800 flex items-center space-x-2">
+          {pendingFile && (
+            <div className="px-4 py-2 bg-[#202c33] text-xs text-[#e9edef] flex items-center justify-between">
+              <span className="truncate flex items-center gap-2">
+                <ImageIcon className="w-3.5 h-3.5" />
+                {pendingFile.name} attached
+              </span>
+              <button type="button" className="text-[#8696a0]" onClick={() => setPendingFile(null)}>
+                Remove
+              </button>
+            </div>
+          )}
+
+          <form onSubmit={handleSend} className="p-2 bg-[#202c33] flex items-center space-x-2">
             <input
-              type="text"
-              placeholder={
-                selectedConv.status === 'HUMAN_ACTIVE'
-                  ? 'Type a message to send directly to customer via WhatsApp...'
-                  : 'Send a human reply (will be delivered to customer WhatsApp)...'
-              }
-              value={replyText}
-              onChange={e => setReplyText(e.target.value)}
-              className="flex-1 bg-slate-800 border border-slate-700/80 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-400 focus:outline-none focus:border-emerald-500"
+              ref={fileRef}
+              type="file"
+              accept="image/*,video/*,audio/*"
+              className="hidden"
+              onChange={e => attachFile(e.target.files?.[0])}
             />
             <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className="text-[#8696a0] hover:text-[#e9edef] p-2"
+              title="Photo, video, or voice file"
+            >
+              <Paperclip className="w-5 h-5" />
+            </button>
+            <input
+              type="text"
+              placeholder="Type a message"
+              value={replyText}
+              onChange={e => setReplyText(e.target.value)}
+              className="flex-1 bg-[#2a3942] border-0 rounded-lg px-4 py-2.5 text-sm text-[#e9edef] placeholder-[#8696a0] focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={toggleVoice}
+              className={`p-2 rounded-full ${recording ? 'bg-red-600 text-white' : 'text-[#8696a0] hover:text-[#e9edef]'}`}
+              title="Voice note"
+            >
+              <Mic className="w-5 h-5" />
+            </button>
+            <button
               type="submit"
-              disabled={isSending || !replyText.trim()}
-              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white p-2.5 rounded-xl transition-colors shadow-md shadow-emerald-950"
+              disabled={isSending || (!replyText.trim() && !pendingFile)}
+              className="bg-[#00a884] hover:bg-[#06cf9c] disabled:opacity-50 text-[#111b21] p-2.5 rounded-full"
             >
               <Send className="w-4 h-4" />
             </button>

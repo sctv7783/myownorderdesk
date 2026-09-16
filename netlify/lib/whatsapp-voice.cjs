@@ -7,6 +7,10 @@ function mediaIdFromMessage(msg) {
   return (
     msg.audio?.id ||
     msg.voice?.id ||
+    msg.image?.id ||
+    msg.video?.id ||
+    msg.document?.id ||
+    msg.sticker?.id ||
     msg.ptt?.id ||
     (msg.type === 'audio' && msg.id) ||
     ''

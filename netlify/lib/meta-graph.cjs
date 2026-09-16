@@ -65,19 +65,12 @@ async function verifyMetaCredentials({ phoneNumberId, accessToken, wabaId }) {
   };
 }
 
-async function sendWhatsAppText({ phoneNumberId, accessToken, to, text }) {
+async function graphMessage(phoneNumberId, accessToken, payload) {
   const token = String(accessToken || '').trim();
   const phoneId = String(phoneNumberId || '').trim();
-  const cleanedTo = normalizePhone(to);
-  const bodyText = String(text || '').trim();
-
   if (!phoneId || isPlaceholderToken(token)) {
     return { success: false, error: 'WhatsApp credentials are missing. Save Meta credentials first.' };
   }
-  if (!cleanedTo) {
-    return { success: false, error: 'Destination phone number is required.' };
-  }
-
   const url = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneId)}/messages`;
   const res = await fetch(url, {
     method: 'POST',
@@ -88,50 +81,140 @@ async function sendWhatsAppText({ phoneNumberId, accessToken, to, text }) {
     body: JSON.stringify({
       messaging_product: 'whatsapp',
       recipient_type: 'individual',
-      to: cleanedTo,
-      type: 'text',
-      text: { body: bodyText || 'Test message from WhatsApp OrderDesk' }
+      ...payload
     })
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    return { success: false, error: data.error?.message || 'Failed to send WhatsApp message.' };
+    const error = data.error?.message || `Failed to send WhatsApp ${payload.type || 'message'}.`;
+    console.warn('[Meta send]', payload.type, error);
+    return { success: false, error, data };
   }
   return { success: true, messageId: data.messages?.[0]?.id };
 }
 
-async function sendWhatsAppImage({ phoneNumberId, accessToken, to, imageUrl, caption }) {
+async function uploadWhatsAppMedia({ phoneNumberId, accessToken, buffer, mime, filename }) {
   const token = String(accessToken || '').trim();
   const phoneId = String(phoneNumberId || '').trim();
-  const cleanedTo = normalizePhone(to);
-  const link = String(imageUrl || '').trim();
-  if (!phoneId || isPlaceholderToken(token) || !cleanedTo || !/^https?:\/\//i.test(link)) {
-    return { success: false, error: 'Image URL or WhatsApp credentials missing.' };
+  if (!phoneId || isPlaceholderToken(token) || !buffer?.length) {
+    return { success: false, error: 'Media upload credentials or file missing.' };
   }
-
-  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneId)}/messages`;
+  const { Blob } = require('buffer');
+  const type = String(mime || 'image/jpeg');
+  const kind = type.startsWith('video') ? 'video' : type.startsWith('audio') ? 'audio' : 'image';
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', kind);
+  form.append('file', new Blob([buffer], { type }), filename || `upload.${kind}`);
+  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(phoneId)}/media`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to: cleanedTo,
-      type: 'image',
-      image: {
-        link,
-        caption: String(caption || '').slice(0, 1024)
-      }
-    })
+    headers: { Authorization: `Bearer ${token}` },
+    body: form
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    return { success: false, error: data.error?.message || 'Failed to send WhatsApp image.' };
+  if (!res.ok || !data.id) {
+    const error = data.error?.message || 'Meta media upload failed.';
+    console.warn('[Meta media upload]', error);
+    return { success: false, error };
   }
-  return { success: true, messageId: data.messages?.[0]?.id };
+  return { success: true, mediaId: data.id };
+}
+
+async function bufferFromUrl(imageUrl) {
+  const link = String(imageUrl || '').trim();
+  if (!/^https?:\/\//i.test(link)) return null;
+  try {
+    const res = await fetch(link, { redirect: 'follow' });
+    if (!res.ok) {
+      console.warn('[Meta media fetch]', res.status, link.slice(0, 120));
+      return null;
+    }
+    const mime = String(res.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer.length) return null;
+    const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('mp4') ? 'mp4' : 'jpg';
+    return { buffer, mime, filename: `catalog.${ext}` };
+  } catch (err) {
+    console.warn('[Meta media fetch]', err?.message || err);
+    return null;
+  }
+}
+
+function decodeDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return {
+    mime: match[1],
+    buffer: Buffer.from(match[2], 'base64')
+  };
+}
+
+async function sendWhatsAppText({ phoneNumberId, accessToken, to, text }) {
+  const cleanedTo = normalizePhone(to);
+  const bodyText = String(text || '').trim();
+  if (!cleanedTo) return { success: false, error: 'Destination phone number is required.' };
+  return graphMessage(phoneNumberId, accessToken, {
+    to: cleanedTo,
+    type: 'text',
+    text: { body: bodyText || 'Test message from WhatsApp OrderDesk' }
+  });
+}
+
+async function sendWhatsAppImage({ phoneNumberId, accessToken, to, imageUrl, caption }) {
+  return sendWhatsAppMedia({
+    phoneNumberId,
+    accessToken,
+    to,
+    mediaUrl: imageUrl,
+    mediaType: 'image',
+    caption
+  });
+}
+
+async function sendWhatsAppMedia({ phoneNumberId, accessToken, to, mediaUrl, mediaType, caption, mime, buffer, filename }) {
+  const cleanedTo = normalizePhone(to);
+  if (!cleanedTo) return { success: false, error: 'Destination phone number is required.' };
+  const kindRaw = String(mediaType || mime || 'image').toLowerCase();
+  const type = kindRaw.startsWith('video') ? 'video' : kindRaw.startsWith('audio') ? 'audio' : 'image';
+  const cap = String(caption || '').slice(0, 1024);
+  const link = String(mediaUrl || '').trim();
+
+  const sendWithBuffer = async (fileBuffer, fileMime, fileName) => {
+    const uploaded = await uploadWhatsAppMedia({
+      phoneNumberId,
+      accessToken,
+      buffer: fileBuffer,
+      mime: fileMime || (type === 'video' ? 'video/mp4' : type === 'audio' ? 'audio/ogg' : 'image/jpeg'),
+      filename: fileName || `staff.${type}`
+    });
+    if (!uploaded.success) return uploaded;
+    const payload = { id: uploaded.mediaId };
+    if (type !== 'audio' && cap) payload.caption = cap;
+    return graphMessage(phoneNumberId, accessToken, { to: cleanedTo, type, [type]: payload });
+  };
+
+  if (buffer?.length) {
+    return sendWithBuffer(buffer, mime, filename);
+  }
+
+  const decoded = decodeDataUrl(link);
+  if (decoded) {
+    return sendWithBuffer(decoded.buffer, decoded.mime);
+  }
+
+  if (/^https?:\/\//i.test(link) && type !== 'audio') {
+    const viaLink = await graphMessage(phoneNumberId, accessToken, {
+      to: cleanedTo,
+      type,
+      [type]: { link, caption: cap }
+    });
+    if (viaLink.success) return viaLink;
+  }
+
+  const file = await bufferFromUrl(link);
+  if (!file) return { success: false, error: 'Media file missing or not publicly reachable.' };
+  return sendWithBuffer(file.buffer, file.mime, file.filename);
 }
 
 async function markMessageAsRead({ phoneNumberId, accessToken, messageId }) {
@@ -169,5 +252,7 @@ module.exports = {
   verifyMetaCredentials,
   sendWhatsAppText,
   sendWhatsAppImage,
+  sendWhatsAppMedia,
+  uploadWhatsAppMedia,
   markMessageAsRead
 };

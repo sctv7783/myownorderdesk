@@ -14,34 +14,55 @@ const { markMessageAsRead, sendWhatsAppText, sendWhatsAppImage } = require('../l
 const { generateAgentReply } = require('../lib/groq-agent.cjs');
 const { appendMessage } = require('../lib/conversations.cjs');
 const { getBusiness, findBusinessIdByPhone, listBusinesses } = require('../lib/business.cjs');
-const { voiceToText, mediaIdFromMessage } = require('../lib/whatsapp-voice.cjs');
+const { voiceToText, mediaIdFromMessage, downloadWhatsAppMedia } = require('../lib/whatsapp-voice.cjs');
+const { persistChatMedia } = require('../lib/product-media.cjs');
 
 async function incomingFromMessage(msg, accessToken) {
   if (msg.type === 'location' && msg.location) {
     const loc = msg.location;
-    return `Delivery location: ${[loc.name, loc.address].filter(Boolean).join(', ')} (lat ${loc.latitude}, lng ${loc.longitude})`.trim();
+    return {
+      text: `Delivery location: ${[loc.name, loc.address].filter(Boolean).join(', ')} (lat ${loc.latitude}, lng ${loc.longitude})`.trim(),
+      mediaType: 'location'
+    };
   }
   if (msg.type === 'contacts' && Array.isArray(msg.contacts)) {
-    return `Customer shared contact: ${msg.contacts.map((c) => c.name?.formatted_name || '').join(', ')}`;
+    return {
+      text: `Customer shared contact: ${msg.contacts.map((c) => c.name?.formatted_name || '').join(', ')}`,
+      mediaType: 'contacts'
+    };
   }
-  if (msg.type === 'audio' || msg.type === 'voice' || mediaIdFromMessage(msg)) {
+  if (msg.type === 'audio' || msg.type === 'voice' || msg.audio) {
     const spoken = await voiceToText(msg, accessToken);
-    if (spoken) return spoken;
-    return 'Customer sent a voice note. Continue the same order/chat. Ask one short question only if you still need a product, quantity, or address.';
+    return {
+      text: spoken || '[media:audio]',
+      mediaType: 'audio',
+      mediaId: mediaIdFromMessage(msg)
+    };
   }
-  return (
-    msg.text?.body ||
-    msg.button?.text ||
-    msg.interactive?.button_reply?.title ||
-    msg.image?.caption ||
-    msg.video?.caption ||
-    msg.document?.caption ||
-    (msg.type === 'image'
-      ? '[Customer sent a photo. Match it to a catalog product if you can and help them order.]'
-      : msg.type && msg.type !== 'text'
-        ? `[${msg.type}]`
-        : '')
-  );
+  if (msg.type === 'image' || msg.image) {
+    return {
+      text: msg.image?.caption || '[media:image]',
+      mediaType: 'image',
+      mediaId: msg.image?.id
+    };
+  }
+  if (msg.type === 'video' || msg.video) {
+    return {
+      text: msg.video?.caption || '[media:video]',
+      mediaType: 'video',
+      mediaId: msg.video?.id
+    };
+  }
+  return {
+    text:
+      msg.text?.body ||
+      msg.button?.text ||
+      msg.interactive?.button_reply?.title ||
+      msg.document?.caption ||
+      (msg.type && msg.type !== 'text' ? `[${msg.type}]` : ''),
+    mediaType: msg.type === 'text' ? 'text' : msg.type || 'text',
+    mediaId: mediaIdFromMessage(msg)
+  };
 }
 
 function firstValue(value) {
@@ -158,7 +179,20 @@ async function handleIncoming(payload) {
         const contactName =
           val.contacts?.find((c) => c.wa_id === msg.from)?.profile?.name ||
           `Customer ${senderPhone.slice(-4)}`;
-        const incomingText = await incomingFromMessage(msg, token);
+        const incoming = await incomingFromMessage(msg, token);
+        const incomingText = incoming.text || '';
+        let mediaUrl = '';
+        if (incoming.mediaId && token && (incoming.mediaType === 'image' || incoming.mediaType === 'video')) {
+          const file = await downloadWhatsAppMedia({ mediaId: incoming.mediaId, accessToken: token });
+          if (file?.buffer) {
+            const uploaded = await persistChatMedia(
+              tenantId || 'unmapped',
+              `chat_${senderPhone.slice(-8)}`,
+              `data:${file.mime};base64,${file.buffer.toString('base64')}`
+            );
+            mediaUrl = uploaded || '';
+          }
+        }
 
         if (token && phoneId) {
           markMessageAsRead({
@@ -174,7 +208,9 @@ async function handleIncoming(payload) {
           phoneNumberId: phoneId || phoneNumberId,
           sender: 'CUSTOMER',
           text: incomingText,
-          whatsappMessageId: msg.id
+          whatsappMessageId: msg.id,
+          mediaUrl,
+          mediaType: incoming.mediaType || 'text'
         });
 
         if (!token || !phoneId) {
@@ -196,31 +232,45 @@ async function handleIncoming(payload) {
           continue;
         }
 
-        await Promise.all(
-          (result.images || []).map(async (image) => {
-            await sendWhatsAppImage({
-              phoneNumberId: phoneId,
-              accessToken: token,
-              to: msg.from,
-              imageUrl: image.imageUrl,
-              caption: image.caption
-            });
+        let sentPhotos = 0;
+        const photoErrors = [];
+        for (const image of result.images || []) {
+          const sent = await sendWhatsAppImage({
+            phoneNumberId: phoneId,
+            accessToken: token,
+            to: msg.from,
+            imageUrl: image.imageUrl,
+            caption: image.caption
+          });
+          if (sent.success) {
+            sentPhotos += 1;
             await appendMessage(tenantId, {
               customerPhone: senderPhone,
               customerName: contactName,
               phoneNumberId: phoneId,
               sender: 'AI',
-              text: `[Photo] ${image.caption}`
+              text: image.caption || 'Photo',
+              mediaUrl: image.imageUrl,
+              mediaType: 'image',
+              whatsappMessageId: sent.messageId
             });
-          })
-        );
+          } else {
+            photoErrors.push(sent.error || 'image send failed');
+            console.warn('[Webhook] photo send failed', sent.error, image.imageUrl);
+          }
+        }
 
-        if (result.reply) {
+        let reply = result.reply || '';
+        if ((result.images || []).length && !sentPhotos) {
+          reply = `${reply || 'Photos bhejni thin.'}\n\nPhotos WhatsApp par deliver nahi ho sakin. Dashboard mein product images public HTTPS honi chahiye.`;
+        }
+        const photoOnly = sentPhotos > 0 && /^[^\n]*ki photos\.?$/i.test(String(reply || '').trim());
+        if (reply && !photoOnly) {
           await sendWhatsAppText({
             phoneNumberId: phoneId,
             accessToken: token,
             to: msg.from,
-            text: result.reply
+            text: reply
           });
 
           await appendMessage(tenantId, {
@@ -228,7 +278,7 @@ async function handleIncoming(payload) {
             customerName: contactName,
             phoneNumberId: phoneId,
             sender: 'AI',
-            text: result.reply
+            text: reply
           });
         }
       }

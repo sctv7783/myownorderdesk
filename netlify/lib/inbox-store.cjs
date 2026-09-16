@@ -121,6 +121,8 @@ async function appendMessage(tenantId, data) {
     tenantId,
     sender: data.sender || 'CUSTOMER',
     text: data.text || '',
+    mediaUrl: data.mediaUrl || '',
+    mediaType: data.mediaType || 'text',
     whatsappMessageId: data.whatsappMessageId,
     status: data.status || 'DELIVERED',
     createdAt: new Date().toISOString()

@@ -22,13 +22,13 @@
 /api/orders/*  /.netlify/functions/orders  200!
 /api/conversations  /.netlify/functions/inbox  200!
 /api/conversations/  /.netlify/functions/inbox  200!
-/api/conversations/*  /.netlify/functions/inbox  200!
+/api/conversations/*  /.netlify/functions/inbox/:splat  200!
 /api/inbox  /.netlify/functions/inbox  200!
 /api/inbox/  /.netlify/functions/inbox  200!
-/api/inbox/*  /.netlify/functions/inbox  200!
+/api/inbox/*  /.netlify/functions/inbox/:splat  200!
 /api/chats  /.netlify/functions/chats  200!
 /api/chats/  /.netlify/functions/chats  200!
-/api/chats/*  /.netlify/functions/chats  200!
+/api/chats/*  /.netlify/functions/chats/:splat  200!
 /api/tenants  /.netlify/functions/tenants  200!
 /api/tenants/  /.netlify/functions/tenants  200!
 /api/tenants/*  /.netlify/functions/tenants  200!

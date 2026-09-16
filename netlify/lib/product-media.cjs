@@ -109,9 +109,20 @@ async function persistProductImages(tenantId, productKey, urls) {
   return out;
 }
 
+async function persistChatMedia(tenantId, key, dataUrl) {
+  const decoded = decodeDataUrl(dataUrl);
+  if (!decoded?.buffer?.length) return '';
+  if (decoded.buffer.length > 4 * 1024 * 1024) {
+    console.warn('[Chat media] skip oversized file', decoded.buffer.length);
+    return '';
+  }
+  return uploadBuffer(tenantId, key || 'chat', decoded.buffer, decoded.mime, 0);
+}
+
 module.exports = {
   parseImageList,
   publicImageUrls,
   persistProductImages,
+  persistChatMedia,
   MAX_BYTES
 };

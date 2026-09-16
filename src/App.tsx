@@ -482,14 +482,7 @@ export default function App() {
           await pull(`/.netlify/functions/inbox?tenantId=${tid}`)
         );
         if (cancelled || !list.length) return;
-        setConversations(prev => {
-          const prevStamp = prev[0]?.lastMessageAt || '';
-          const nextStamp = list[0]?.lastMessageAt || '';
-          const prevText = prev[0]?.lastMessageText || '';
-          const nextText = list[0]?.lastMessageText || '';
-          if (prev.length === list.length && prevStamp === nextStamp && prevText === nextText) return prev;
-          return list;
-        });
+        setConversations(list);
         setSelectedConvId(prev => {
           if (!prev) return list[0]?.id || prev;
           const still = list.find((c: any) => c.id === prev);
@@ -550,7 +543,8 @@ export default function App() {
         const urls = [
           `/api/conversations/${selectedConvId}/messages?tenantId=${tid}`,
           `/api/inbox/${selectedConvId}/messages?tenantId=${tid}`,
-          `/.netlify/functions/inbox/${selectedConvId}/messages?tenantId=${tid}`
+          `/.netlify/functions/inbox/${selectedConvId}/messages?tenantId=${tid}`,
+          `/api/inbox?tenantId=${tid}&conversationId=${encodeURIComponent(selectedConvId)}&messages=1`
         ];
         const batches: any[] = [];
         for (const url of urls) {
@@ -589,8 +583,9 @@ export default function App() {
   }, [currentTenant, selectedConvId]);
 
   // Handle staff reply in WhatsApp inbox
-  const handleSendMessage = async (text: string) => {
+  const handleSendMessage = async (text: string, media?: { mediaUrl: string; mediaType: string }) => {
     if (!currentTenant || !selectedConvId || isSendingMessage) return;
+    if (!text.trim() && !media?.mediaUrl) return;
     setIsSendingMessage(true);
     try {
       const res = await fetch(`/api/conversations/${selectedConvId}/messages`, {
@@ -598,17 +593,18 @@ export default function App() {
         headers: authHeaders(currentTenant.id),
         body: JSON.stringify({
           text,
-          sender: 'STAFF'
+          sender: 'STAFF',
+          mediaUrl: media?.mediaUrl || '',
+          mediaType: media?.mediaType || 'text'
         })
       });
       const data = await res.json();
       if (data.message) {
         setMessages(prev => [...prev, data.message]);
-        // Refresh conversation preview
         setConversations(prev =>
           prev.map(c =>
             c.id === selectedConvId
-              ? { ...c, lastMessageText: text, lastMessageAt: new Date().toISOString() }
+              ? { ...c, lastMessageText: text || data.message.text, lastMessageAt: new Date().toISOString() }
               : c
           )
         );

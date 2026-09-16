@@ -258,9 +258,9 @@ function isStockQuery(text) {
 
 function wantsPhotos(text) {
   const t = String(text || '').toLowerCase();
-  return /photo|photos|pic\b|pics\b|picture|image|images|tasveer|tasvir|📷|📸|bhyj|bhejo|bhejna|bhyjna|bhyjo/.test(
-    t
-  ) && /photo|pic|tasveer|tasvir|image|picture|📷|📸/.test(t);
+  if (/^\[media:/.test(t)) return false;
+  return /photo|photos|pic\b|pics\b|picture|image|images|tasveer|tasvir|📷|📸/.test(t) &&
+    /photo|pic|tasveer|tasvir|image|picture|📷|📸|bhyj|bhejo|bhejna|bhyjna|bhyjo|send kro|send karo|bhej/.test(t);
 }
 
 function isPurchaseIntent(text) {

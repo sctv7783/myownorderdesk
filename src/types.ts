@@ -222,6 +222,8 @@ export interface ConversationMessage {
   tenantId: string;
   sender: 'CUSTOMER' | 'AI' | 'STAFF' | 'SYSTEM';
   text: string;
+  mediaUrl?: string;
+  mediaType?: string;
   whatsappMessageId?: string;
   status?: 'SENT' | 'DELIVERED' | 'READ' | 'FAILED';
   meta?: any;
