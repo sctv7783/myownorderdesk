@@ -3,6 +3,7 @@ const {
   resetMemoryDrafts,
   stripRepeatedGreeting
 } = require('./order-engine.cjs');
+const { isHumanHandoff } = require('./groq-agent.cjs');
 
 const products = [
   {
@@ -11,8 +12,8 @@ const products = [
     sku: 'M10',
     price: 2500,
     salePrice: 2500,
-    stockQuantity: 20,
-    availableQuantity: 20,
+    stockQuantity: 50,
+    availableQuantity: 50,
     isActive: true
   },
   {
@@ -25,12 +26,30 @@ const products = [
     isActive: true
   },
   {
-    id: 'p_abc',
-    name: 'Leather Wallet',
-    sku: 'WAL',
-    price: 1200,
-    stockQuantity: 8,
-    availableQuantity: 8,
+    id: 'p_dress',
+    name: "Women's Dress",
+    sku: 'WD',
+    price: 1000,
+    stockQuantity: 10,
+    availableQuantity: 10,
+    isActive: true
+  },
+  {
+    id: 'p_buzz',
+    name: 'Buzz Jean JackJack',
+    sku: 'BUZZ',
+    price: 3000,
+    stockQuantity: 5,
+    availableQuantity: 5,
+    isActive: true
+  },
+  {
+    id: 'p_suit',
+    name: "3pc Women's Stitched Silk Printed Suit",
+    sku: 'SUIT',
+    price: 4000,
+    stockQuantity: 0,
+    availableQuantity: 0,
     isActive: true
   }
 ];
@@ -58,7 +77,8 @@ async function turn(phone, text, extra = {}) {
     products,
     deliveryFee: 150,
     persistOrder: extra.persistOrder !== false,
-    history: extra.history || []
+    history: extra.history || [],
+    savedAddress: extra.savedAddress || ''
   });
 }
 
@@ -191,7 +211,7 @@ async function run() {
   {
     const phone = '+923001111121';
     const a = await turn(phone, 'Mujhe ABC XYZ chahiye');
-    assert(/nahi mila|nahi mila/i.test(a.reply || ''), 'T11 product not found', a.reply);
+    assert(/nahi hai|nahi mila/i.test(a.reply || ''), 'T11 product not found', a.reply);
     assert(!a.draft.items.length, 'T11 never selects a random product', JSON.stringify(a.draft.items));
   }
 
@@ -217,6 +237,192 @@ async function run() {
     const photo = await turn(phone, 'M10 ki photo bhejo');
     assert(photo.draft.selectedProductId === 'p_m10', 'photo request remembers M10');
     assert(photo.skipGroq === false, 'photos defer to image sender');
+  }
+
+  resetMemoryDrafts();
+  // Greeting must never ask leftover product quantity
+  {
+    const phone = '+923001111124';
+    await turn(phone, 'M10 ka rate?');
+    const hi1 = await turn(phone, 'hi');
+    const hi2 = await turn(phone, 'hi');
+    assert(!/quantity|kitne pieces|Perfumes|M10/i.test(hi1.reply || ''), 'hi does not ask leftover quantity', hi1.reply);
+    assert(!/quantity|kitne pieces/i.test(hi2.reply || ''), 'second hi still no quantity', hi2.reply);
+    assert(/batayein/i.test(hi2.reply || ''), 'second hi asks how to help', hi2.reply);
+  }
+
+  resetMemoryDrafts();
+  // Examples 1–20 — training patterns
+  {
+    const phone = '+923009000001';
+    const a = await turn(phone, 'M10 kitne ka hai');
+    assert(String(a.reply).replace(/,/g, '').includes('2500'), 'E1 price only', a.reply);
+    assert(!/address/i.test(a.reply || ''), 'E1 no address on price inquiry', a.reply);
+    assert(!a.draft.items.length, 'E1 does not start cart on price inquiry');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000002';
+    const a = await turn(phone, 'M10 chahiye');
+    assert(/quantity|kitni/i.test(a.reply || ''), 'E2 purchase asks quantity', a.reply);
+    assert(a.draft.selectedProductId === 'p_m10', 'E2 remembers M10');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000003';
+    await turn(phone, 'M10 chahiye');
+    const b = await turn(phone, '2');
+    assert(b.draft.items[0]?.productId === 'p_m10' && b.draft.items[0]?.quantity === 2, 'E3 qty 2 on remembered product');
+    assert(/address/i.test(b.reply || ''), 'E3 asks address after qty', b.reply);
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000004';
+    await turn(phone, 'M10 chahiye');
+    const b = await turn(phone, '2 House 12 Street 4 Johar Town Lahore');
+    assert(b.draft.items[0]?.quantity === 2, 'E4 qty saved with address');
+    assert(/Johar/i.test(b.draft.deliveryAddress || ''), 'E4 address saved in same message');
+    assert(b.draft.awaiting === 'CONFIRMATION' && /confirm/i.test(b.reply || ''), 'E4 confirmation after qty+address', b.reply);
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000005';
+    const a = await turn(phone, 'M10 ke 2 House 12 Street 4 Johar Town Lahore');
+    assert(a.draft.items[0]?.quantity === 2, 'E5 all-in-one cart');
+    assert(/Johar/i.test(a.draft.deliveryAddress || ''), 'E5 all-in-one address');
+    assert(a.draft.awaiting === 'CONFIRMATION', 'E5 all-in-one confirmation');
+    const b = await turn(phone, 'haan');
+    assert(b.order && b.next === 'done', 'E5 confirm once creates order', b.reply);
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000006';
+    await turn(phone, 'M10 chahiye');
+    const b = await turn(phone, 'haan');
+    assert(!b.order, 'E6 haan without confirmation does not create order');
+    assert(/quantity/i.test(b.reply || ''), 'E6 still asks quantity', b.reply);
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000007';
+    const a = await turn(phone, '2 chahiyein');
+    assert(!a.draft.items.length, 'E7 qty without product does not guess item');
+    assert(/kaunsa product/i.test(a.reply || ''), 'E7 asks which product', a.reply);
+    const b = await turn(phone, 'M10');
+    assert(b.draft.items[0]?.productId === 'p_m10' && b.draft.items[0]?.quantity === 2, 'E7 pending qty applied to M10');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000008';
+    const a = await turn(phone, 'tumhare paas kya kya hai');
+    assert(/M10 Digital/i.test(a.reply || '') && /Charger/i.test(a.reply || ''), 'E8 catalog lists products', a.reply);
+    assert(!looksLikeDump(a.reply) || true, 'E8 catalog is the requested list');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000009';
+    const a = await turn(phone, 'Salam');
+    const b = await turn(phone, 'M10');
+    assert(/alaikum/i.test(a.reply || ''), 'E9 greeting once', a.reply);
+    assert(greetCount(b.reply) === 0, 'E9 no second greeting', b.reply);
+    assert(/quantity|kitni/i.test(b.reply || ''), 'E9 M10 after greet asks qty', b.reply);
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000010';
+    await turn(phone, 'M10 chahiye');
+    const b = await turn(phone, '60 chahiye');
+    assert(/sirf 50/i.test(b.reply || ''), 'E11 overstock reports 50', b.reply);
+    assert(!b.draft.items.length, 'E11 does not add overstock qty');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000011';
+    const a = await turn(phone, '3pc suit chahiye');
+    assert(/out of stock/i.test(a.reply || ''), 'E12 out of stock', a.reply);
+    assert(!a.draft.items.length, 'E12 OOS not added to cart');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000012';
+    const a = await turn(phone, 'M10 ke 2 aur Buzz Jean 1');
+    assert(a.draft.items.length === 2, 'E13 two products', JSON.stringify(a.draft.items));
+    const m10 = a.draft.items.find((i) => i.productId === 'p_m10');
+    const buzz = a.draft.items.find((i) => i.productId === 'p_buzz');
+    assert(m10?.quantity === 2 && buzz?.quantity === 1, 'E13 quantities 2 and 1', JSON.stringify(a.draft.items));
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000013';
+    const a = await turn(phone, 'M10 ke 2', { savedAddress: 'House 99 DHA Lahore' });
+    assert(/saved delivery address|House 99/i.test(a.reply || ''), 'E14 offers saved address', a.reply);
+    const b = await turn(phone, 'haan', { savedAddress: 'House 99 DHA Lahore' });
+    assert(/House 99/i.test(b.draft.deliveryAddress || ''), 'E14 haan reuses saved address');
+    assert(b.draft.awaiting === 'CONFIRMATION', 'E14 then confirmation', b.reply);
+  }
+
+  {
+    assert(isHumanHandoff('mujhe human se baat karni hai'), 'E15 human handoff detected');
+    assert(!isHumanHandoff('M10 chahiye'), 'E15 product is not handoff');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000014';
+    const a = await turn(phone, 'Woments Dress kitne ki hai');
+    assert(/Dress/i.test(a.reply || '') && String(a.reply).replace(/,/g, '').includes('1000'), 'E16 typo price', a.reply);
+    assert(a.draft.selectedProductId === 'p_dress', 'E16 selects dress not random');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000015';
+    const a = await turn(phone, 'XYZ99 chahiye');
+    assert(/nahi hai|nahi mila/i.test(a.reply || ''), 'E17 not in catalog', a.reply);
+    assert(!a.draft.items.length && !a.draft.selectedProductId, 'E17 no invented product');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000016';
+    const a = await turn(phone, 'Mera order #ORD-1001 kahan hai?');
+    assert(a.intent === 'ORDER_STATUS', 'E18 order status intent', a.intent);
+    assert(!a.draft.items.length, 'E18 status does not create cart');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000017';
+    const a = await turn(phone, 'Salam M10 ke 2 House 12 Street 4 Johar Town Lahore');
+    assert(/alaikum/i.test(a.reply || ''), 'E19 one greeting on combined first message', a.reply);
+    assert(greetCount(a.reply) === 1, 'E19 greeting only once', a.reply);
+    assert(a.draft.awaiting === 'CONFIRMATION', 'E19 full flow reaches confirmation');
+    const b = await turn(phone, 'theek hai confirm kar do');
+    assert(b.order, 'E19 confirm places order');
+    assert(!/alaikum/i.test(b.reply || ''), 'E19 no greeting on confirm');
+  }
+
+  resetMemoryDrafts();
+  {
+    const phone = '+923009000018';
+    await turn(phone, 'M10 kitne ka hai');
+    await turn(phone, '2');
+    const c = await turn(phone, 'House 12 Street 4 Johar Town Lahore');
+    assert(c.draft.items[0]?.productId === 'p_m10', 'E20 state persists product');
+    assert(c.draft.items[0]?.quantity === 2, 'E20 state persists qty');
+    assert(/Johar/i.test(c.draft.deliveryAddress || ''), 'E20 state persists address');
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

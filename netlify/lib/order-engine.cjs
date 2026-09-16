@@ -75,8 +75,23 @@ function pickRicherDraft(...drafts) {
   return drafts.filter(Boolean).sort((a, b) => draftScore(b) - draftScore(a))[0] || emptyDraft();
 }
 
-async function loadDraft(tenantId, { customerPhone, conversationId } = {}) {
+async function loadDraft(tenantId, { customerPhone, conversationId, isolated } = {}) {
   const found = [];
+  if (isolated) {
+    const key = convKey(tenantId, conversationId || `iso_${customerPhone}`);
+    const mem = memoryDrafts.get(key);
+    if (mem) return normalizeDraft(mem);
+    const store = await getDraftStore();
+    if (store && conversationId) {
+      try {
+        const byConv = await store.get(key, { type: 'json' });
+        if (byConv) return normalizeDraft(byConv);
+      } catch {
+        /* continue */
+      }
+    }
+    return emptyDraft();
+  }
   const memConv = conversationId ? memoryDrafts.get(convKey(tenantId, conversationId)) : null;
   const memPhone = memoryDrafts.get(phoneKey(tenantId, customerPhone));
   if (memConv) found.push(normalizeDraft(memConv));
@@ -100,18 +115,25 @@ async function loadDraft(tenantId, { customerPhone, conversationId } = {}) {
       select: '*',
       business_id: `eq.${tenantId}`
     });
-    const match = (rows || []).find(
-      (row) =>
-        row.conversation_id === conversationId ||
-        String(row.customer_phone || '').replace(/\D/g, '') === digits
-    );
+    const match =
+      (rows || []).find((row) => digits && String(row.customer_phone || '').replace(/\D/g, '') === digits) ||
+      (conversationId
+        ? (rows || []).find((row) => row.conversation_id === conversationId)
+        : null);
     if (match?.state) found.push(normalizeDraft(match.state));
   }
   return pickRicherDraft(...found);
 }
 
-async function saveDraft(tenantId, draft, { customerPhone, conversationId } = {}) {
+async function saveDraft(tenantId, draft, { customerPhone, conversationId, isolated } = {}) {
   const next = { ...normalizeDraft(draft), updatedAt: new Date().toISOString() };
+  if (isolated) {
+    const key = convKey(tenantId, conversationId || `iso_${customerPhone}`);
+    memoryDrafts.set(key, next);
+    const store = await getDraftStore();
+    if (store) await store.setJSON(key, next);
+    return next;
+  }
   memoryDrafts.set(phoneKey(tenantId, customerPhone), next);
   if (conversationId) memoryDrafts.set(convKey(tenantId, conversationId), next);
   const store = await getDraftStore();
@@ -166,14 +188,29 @@ function extractQuantity(text) {
     .replace(/\b\d+\s*(?:wala|wali|wale)\b/gi, ' ')
     .trim();
   if (!raw) return null;
-  if (looksLikeAddress(raw) && !isQuantityOnly(raw)) return null;
   const cued = raw.match(
-    /(\d+)\s*(?:x|pcs?|pieces?|pair|pairs|qty|quantity|adad|dane|chahiye|chahiyein|kar do|kar dein)\b/i
+    /(?<![A-Za-z0-9])(\d+)\s*(?:x|pcs?|pieces?|pair|pairs|qty|quantity|adad|dane|chahiye|chahiyein|kar do|kar dein)\b/i
   );
   if (cued) {
     const qty = Number(cued[1]);
     if (qty >= 1 && qty <= 9999) return qty;
   }
+  const keQty = raw.match(/\b(?:ke|ki|of)\s+(\d+)\b/i);
+  if (keQty) {
+    const qty = Number(keQty[1]);
+    if (qty >= 1 && qty <= 9999) return qty;
+  }
+  const leading = raw.match(/^(?:sirf|only|bs|just)?\s*(\d+)\s+(.+)$/i);
+  if (leading) {
+    const qty = Number(leading[1]);
+    const rest = String(leading[2] || '').trim();
+    const restIsAddress = looksLikeAddress(rest);
+    const qtyThenHouse = /^(house|h#|flat|plot|apartment)\b/i.test(rest);
+    if (qty >= 1 && qty <= 9999 && (!restIsAddress || qtyThenHouse) && /[a-z]/i.test(rest)) {
+      return qty;
+    }
+  }
+  if (looksLikeAddress(raw) && !isQuantityOnly(raw)) return null;
   if (isQuantityOnly(raw)) {
     const n = Number(String(raw).replace(/[^\d]/g, ''));
     if (n >= 1 && n <= 9999) return n;
@@ -182,10 +219,10 @@ function extractQuantity(text) {
       if (new RegExp(`(^|\\s)${word}(\\s|$)`, 'i').test(lower)) return qty;
     }
   }
-  const leading = raw.match(/^(?:sirf|only|bs|just)?\s*(\d+)\s+([a-z0-9].+)$/i);
-  if (leading && !looksLikeAddress(raw)) {
-    const qty = Number(leading[1]);
-    if (qty >= 1 && qty <= 9999) return qty;
+  const trailing = raw.match(/(?<![A-Za-z0-9])(\d+)\s*$/);
+  if (trailing && /[a-z]/i.test(raw) && !looksLikeAddress(raw)) {
+    const qty = Number(trailing[1]);
+    if (qty >= 1 && qty <= 50) return qty;
   }
   return null;
 }
@@ -235,8 +272,9 @@ function isPurchaseIntent(text) {
 
 function isConfirmText(text) {
   const t = String(text || '').toLowerCase().trim();
-  return /^(haan+|han+|ha+|yes+|ok+|okay+|ji+|jee+|g|theek|done|bilkul)(\s|$)/.test(t) ||
-    /\b(confirm|confirm kar|order kar do|order kardo|kar dein|bhej dein|yes please|theek hai)\b/.test(t);
+  if (looksLikeAddress(t) && !/^(haan|han|yes|ok|okay|theek|confirm)\b/.test(t)) return false;
+  return /^(haan+|han+|ha+|yes+|ok+|okay+|theek hai|done|bilkul|confirm)(\s|$)/.test(t) ||
+    /\b(order confirm|confirm kar(?:o| do| dein)?)\b/.test(t);
 }
 
 function isCancel(text) {
@@ -330,7 +368,13 @@ function extractAddress(text, awaitingAddress) {
   const raw = String(text || '').trim();
   const explicit = raw.match(/(?:address|pata|location|yahan bhej(?:\s*dein)?)\s*[:=-]?\s*(.+)/i);
   if (explicit && explicit[1].trim().length >= 6) return explicit[1].trim();
-  if (looksLikeAddress(raw)) return raw;
+  if (looksLikeAddress(raw)) {
+    const start = raw.search(
+      /\b(house|h#|street|gali|mohallah|block|phase|sector|flat|apartment|road|chowk|colony|town|lahore|karachi|islamabad|rawalpindi|faisalabad|multan|peshawar|sialkot|gujranwala|quetta|hyderabad|near|bazar|dha|bahria|gulberg|johar|township|cantt|model town|expo)\b/i
+    );
+    if (start > 0) return raw.slice(start).trim();
+    return raw;
+  }
   if (awaitingAddress && raw.length >= 8 && !isConfirmText(raw) && !isQuantityOnly(raw) && !isCancel(raw)) {
     if (extractQuantity(raw) && !looksLikeAddress(raw)) return '';
     return raw;
@@ -353,10 +397,30 @@ function distinctiveTokens(name) {
     .filter((t) => t.length >= 2 && !['the', 'and', 'for', 'with', 'black', 'white'].includes(t));
 }
 
+function editDistance(a, b) {
+  const s = String(a || '');
+  const t = String(b || '');
+  if (s === t) return 0;
+  if (!s.length) return t.length;
+  if (!t.length) return s.length;
+  const row = Array.from({ length: t.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= s.length; i += 1) {
+    let prev = i - 1;
+    row[0] = i;
+    for (let j = 1; j <= t.length; j += 1) {
+      const cur = row[j];
+      row[j] = s[i - 1] === t[j - 1] ? prev : Math.min(prev, row[j], row[j - 1]) + 1;
+      prev = cur;
+    }
+  }
+  return row[t.length];
+}
+
 function searchProducts(products, query) {
   const active = (products || []).filter((p) => p.isActive !== false);
   const q = String(query || '').toLowerCase();
   if (!q.trim()) return [];
+  const qTokens = q.split(/[^a-z0-9]+/).filter((t) => t.length >= 3);
   const scored = [];
   for (const product of active) {
     const name = String(product.name || '').toLowerCase();
@@ -366,6 +430,9 @@ function searchProducts(products, query) {
     if (sku && sku.length >= 2 && q.includes(sku)) score += 18;
     for (const token of distinctiveTokens(product.name)) {
       if (token.length >= 3 && q.includes(token)) score += token.length >= 5 ? 4 : 2;
+      for (const qt of qTokens) {
+        if (token.length >= 5 && qt.length >= 5 && editDistance(token, qt) <= 2) score += 3;
+      }
     }
     if (score > 0) scored.push({ product, score });
   }
@@ -526,13 +593,13 @@ function stockReply(product, qty) {
   if (stock <= 0) {
     return {
       ok: false,
-      reply: `Maazrat, ${product.name} filhaal out of stock hai. Koi aur item dekhna chahenge?`
+      reply: `Maazrat, ${product.name} filhaal out of stock hai.`
     };
   }
   if (qty > stock) {
     return {
       ok: false,
-      reply: `Is product ke sirf ${stock} piece available hain. Aap ${stock} lena chahenge?`,
+      reply: `Filhaal ${product.name} ke sirf ${stock} pieces available hain. Kya aap ${stock} lena chahenge?`,
       available: stock
     };
   }
@@ -549,9 +616,11 @@ async function applyCustomerTurn({
   businessName,
   deliveryFee = 0,
   persistOrder = true,
-  history = []
+  history = [],
+  isolated = false,
+  savedAddress = ''
 }) {
-  const refs = { customerPhone, conversationId };
+  const refs = { customerPhone, conversationId, isolated };
   let draft = await loadDraft(tenantId, refs);
   const message = String(text || '').trim();
   let historyForHydrate = Array.isArray(history) ? history : [];
@@ -641,29 +710,19 @@ async function applyCustomerTurn({
   }
 
   if (isGreetingOnly(message)) {
-    if (draft.items.length || draft.selectedProductId) {
-      draft.greeted = true;
-      draft.awaiting = nextMissing(draft);
-      const hint =
-        draft.awaiting === 'QUANTITY'
-          ? `Quantity kitni chahiye${draft.selectedProductName ? ` (${draft.selectedProductName})` : ''}?`
-          : draft.awaiting === 'ADDRESS'
-            ? 'Delivery address bata dein.'
-            : draft.awaiting === 'CONFIRMATION'
-              ? 'Order confirm kar doon?'
-              : 'Ji, continue karein.';
-      return done(hint, { intent: 'GREETING' });
+    if (!draft.items.length) {
+      draft.selectedProductId = null;
+      draft.selectedProductName = null;
+      draft.awaiting = 'PRODUCT';
     }
-    if (draft.greeted && draft.lastGreetingSentAt) {
-      return done('Ji, batayein.', { intent: 'GREETING' });
+    if (draft.lastGreetingSentAt) {
+      draft.greeted = true;
+      return done('Ji, batayein — product, price, photo, ya order.', { intent: 'GREETING' });
     }
     draft.lastGreetingSentAt = new Date().toISOString();
-    const reply = maybeGreet(
-      draft,
-      message,
-      'Ji, batayein main aapki kya madad kar sakta hoon?'
-    );
-    draft.awaiting = 'PRODUCT';
+    const reply = maybeGreet(draft, message, 'Ji, batayein aap kis product ke baare mein maloomat chahte hain?');
+    draft.greeted = true;
+    draft.awaiting = draft.items.length ? nextMissing(draft) : 'PRODUCT';
     return done(reply, { intent: 'GREETING' });
   }
 
@@ -693,7 +752,10 @@ async function applyCustomerTurn({
     isConfirmText(working);
 
   if (isConfirmText(working) && extractQuantity(working) == null && !canConfirm) {
-    if (draft.orderCreated && draft.lastOrderNumber && !draft.items.length) {
+    if (draft.savedAddressOffer && (draft.awaiting === 'ADDRESS' || draft.items.length) && !String(draft.deliveryAddress || '').trim()) {
+      draft.deliveryAddress = draft.savedAddressOffer;
+      draft.awaiting = 'CONFIRMATION';
+    } else if (draft.orderCreated && draft.lastOrderNumber && !draft.items.length) {
       return done(`Yeh order pehle se confirm hai: #${draft.lastOrderNumber}.`, {
         intent: 'CONFIRM_ORDER'
       });
@@ -705,7 +767,7 @@ async function applyCustomerTurn({
     if (draft.awaiting === 'QUANTITY') {
       return done('Ji, quantity kitni chahiye? Misal ke taur par 2 pieces.', { intent: 'UPDATE_QUANTITY' });
     }
-    if (draft.awaiting === 'ADDRESS') {
+    if (draft.awaiting === 'ADDRESS' && !String(draft.deliveryAddress || '').trim()) {
       return done('Pehle delivery address bhej dein, phir confirm karunga.', { intent: 'PROVIDE_ADDRESS' });
     }
   }
@@ -766,7 +828,7 @@ async function applyCustomerTurn({
   }
 
   const qty = extractQuantity(working);
-  const address = looksLikeAddress(working) || draft.awaiting === 'ADDRESS'
+  let address = looksLikeAddress(working) || draft.awaiting === 'ADDRESS'
     ? extractAddress(working, draft.awaiting === 'ADDRESS' || Boolean(draft.items.length))
     : '';
   if (address) {
@@ -784,15 +846,16 @@ async function applyCustomerTurn({
       if (!check.ok) return done(maybeGreet(draft, message, check.reply), { intent: 'ADD_TO_CART' });
       upsertItem(draft, row.product, row.quantity || 1);
     }
-  } else if (!address) {
+  } else {
     const resolved = resolveProductMention(products, working);
-    if (resolved.ambiguous) {
+    const addressOnly = Boolean(address) && !qty && resolved.matches.length === 0 && !isPurchaseIntent(working);
+    if (resolved.ambiguous && !addressOnly) {
       const names = resolved.matches.map((p) => p.name).join(', ');
       return done(maybeGreet(draft, message, `Kaunsa wala chahiye: ${names}?`), {
         intent: 'PRODUCT_SEARCH'
       });
     }
-    if (resolved.matches.length === 1) {
+    if (!addressOnly && resolved.matches.length === 1) {
       const product = resolved.matches[0];
       draft.selectedProductId = product.id;
       draft.selectedProductName = product.name;
@@ -815,11 +878,12 @@ async function applyCustomerTurn({
           { intent: 'PRODUCT_INQUIRY' }
         );
       }
-      const nextQty = qty;
+      const nextQty = qty || draft.pendingQuantity;
       if (nextQty) {
         const check = stockReply(product, nextQty);
         if (!check.ok) return done(maybeGreet(draft, message, check.reply), { intent: 'ADD_TO_CART' });
         upsertItem(draft, product, nextQty);
+        draft.pendingQuantity = null;
       } else if (isPurchaseIntent(working) || draft.awaiting === 'PRODUCT') {
         draft.awaiting = 'QUANTITY';
         return done(
@@ -831,7 +895,7 @@ async function applyCustomerTurn({
           { intent: 'ADD_TO_CART' }
         );
       }
-    } else {
+    } else if (!addressOnly) {
       const remembered = rememberedProduct(draft, products);
       if (qty && remembered) {
         const check = stockReply(remembered, qty);
@@ -841,22 +905,23 @@ async function applyCustomerTurn({
         return done('Ji, quantity kitni chahiye? Misal ke taur par 2 pieces.', {
           intent: 'UPDATE_QUANTITY'
         });
-      } else if ((isPurchaseIntent(working) || qty) && !remembered) {
+      } else if (qty && !remembered) {
+        draft.pendingQuantity = qty;
+        return done(
+          maybeGreet(draft, message, `Ji, quantity ${qty} note kar li. Kaunsa product chahiye?`),
+          { intent: 'PRODUCT_SEARCH' }
+        );
+      } else if (isPurchaseIntent(working) && !remembered) {
         return done(
           maybeGreet(
             draft,
             message,
-            'Yeh product catalog mein nahi mila. Dobara name likhein ya "products dikhao".'
+            'Maazrat, yeh item current catalog mein available nahi hai. Agar aap chahein to main available products dikha deta hoon.'
           ),
           { intent: 'PRODUCT_SEARCH' }
         );
       }
     }
-  } else if (qty && rememberedProduct(draft, products) && isUpdateQuantity(working)) {
-    const product = rememberedProduct(draft, products);
-    const check = stockReply(product, qty);
-    if (!check.ok) return done(check.reply, { intent: 'UPDATE_QUANTITY' });
-    upsertItem(draft, product, qty);
   }
 
   draft = totals(draft, fee);
@@ -868,6 +933,18 @@ async function applyCustomerTurn({
 
   if (draft.awaiting === 'ADDRESS' && draft.items.length) {
     const listed = draft.items.map((i) => `${i.quantity}x ${i.productName}`).join(', ');
+    const known = String(savedAddress || draft.savedAddressOffer || '').trim();
+    if (known && !String(draft.deliveryAddress || '').trim()) {
+      draft.savedAddressOffer = known;
+      return done(
+        maybeGreet(
+          draft,
+          message,
+          `Ji, ${listed} note kar liye. Aapka saved delivery address ${known} hai. Isi address par bhejna hai?`
+        ),
+        { intent: 'PROVIDE_ADDRESS' }
+      );
+    }
     return done(maybeGreet(draft, message, `Ji, ${listed} note kar liye. Delivery address bata dein.`), {
       intent: 'ADD_TO_CART'
     });
@@ -877,7 +954,7 @@ async function applyCustomerTurn({
     draft.summaryPresented = true;
     draft.paymentMethod = draft.paymentMethod || 'COD';
     draft.confirmationRequired = true;
-    return done(formatSummary(draft), { intent: 'CONFIRM_ORDER' });
+    return done(maybeGreet(draft, message, formatSummary(draft)), { intent: 'CONFIRM_ORDER' });
   }
 
   if (!draft.items.length && !draft.selectedProductId) {

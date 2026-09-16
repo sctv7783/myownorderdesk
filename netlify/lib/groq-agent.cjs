@@ -81,23 +81,25 @@ function parseMeta(raw) {
 
 const HUMAN_PROMPT = `You are a WhatsApp ordering assistant.
 
-You must use the current conversation state as the primary context.
-Never reset the conversation on every message.
-Never ask for information that is already present in the state.
-Never guess a product, quantity, price, stock, address or order number.
-Never select the first catalog product as a guess.
-A greeting must not override an actionable request.
-If the customer provides a quantity after a product was discussed, apply that quantity to the remembered product.
-If the customer provides an address while a cart exists, save the address and continue the order flow.
-Only interpret "haan", "yes", "okay", "theek hai" or "confirm" as final confirmation when the backend state says that final confirmation is pending.
-Never create an order without: valid cart, valid product IDs, valid quantities, verified stock, verified current prices, delivery address, and explicit confirmation.
-Keep responses concise and natural for WhatsApp.
-Use the customer's language style: Urdu, Roman Urdu, English, or mixed.
-Do not greet repeatedly.
-Do not show the complete catalog unless the customer asks for it.
-Do not restart the conversation after every message.
-The database and ENGINE_HINT / ORDER DRAFT are the source of truth.
-Backend sends WhatsApp images. Never write "photo bhej raha hoon", never paste URLs, never mention META.
+Use ORDER DRAFT as memory. Never reset the chat. Never guess product, price, stock, address or order number. Never pick the first catalog item.
+
+Patterns (follow the behavior, do not copy wording blindly):
+- Price question ("kitne ka") → only price. No address. No order.
+- Product without quantity → quote price and ask quantity.
+- Quantity after a remembered product → apply it to THAT product, then ask address. Do not ask "kaunsa product".
+- Quantity + address in one message → save both, show totals, ask confirmation.
+- Product + qty + address in one message → summary + confirm.
+- "haan" creates an order ONLY when awaiting=CONFIRMATION and summary was shown.
+- "haan" while awaiting quantity → ask quantity again, never create an order.
+- Bare quantity with no product → remember the number and ask which product.
+- Catalog request → list once. Do not dump catalog again unless asked.
+- Greeting only once. Later turns never start with Salam.
+- Over-stock → tell actual available stock. Out of stock → say out of stock.
+- Multiple products in one message → keep every item.
+- If a saved delivery address exists, ask to reuse it. Do not silently assume.
+- Human request → hand off and stop selling.
+- Unknown product → say it is not in the catalog. Never invent a price.
+- Order status → use CUSTOMER PAST ORDERS only.
 
 <<<META
 {"send_images":[],"note":""}
@@ -190,7 +192,7 @@ async function generateAgentReply(incomingText, options = {}) {
       await setConversationStatus(tenantId, options.conversationId, 'HUMAN_ACTIVE');
     }
     return {
-      reply: 'Theek hai, main aapko human staff se connect kar raha hoon. Staff jaldi reply karega.',
+      reply: 'Ji bilkul. Aapki conversation staff member ko transfer kar raha hoon.',
       skipped: false,
       handoff: true,
       settings,
@@ -205,8 +207,10 @@ async function generateAgentReply(incomingText, options = {}) {
 
   let history = [];
   try {
-    if (options.conversationId) {
+    if (options.conversationId && !options.isolated) {
       history = await listMessages(tenantId, options.conversationId, options.phoneNumberId);
+    } else if (Array.isArray(options.history)) {
+      history = options.history;
     }
   } catch (err) {
     console.warn('[Groq] history load failed', err?.message || err);
@@ -221,8 +225,10 @@ async function generateAgentReply(incomingText, options = {}) {
     products,
     businessName,
     deliveryFee,
-    persistOrder: true,
-    history
+    persistOrder: options.persistOrder !== false,
+    history,
+    isolated: Boolean(options.isolated),
+    savedAddress: (pastOrders || []).find((o) => o.deliveryAddress)?.deliveryAddress || ''
   });
 
   const draft = engine.draft || engine.cart;
@@ -235,6 +241,25 @@ async function generateAgentReply(incomingText, options = {}) {
   const continuing = Boolean(historyText || draft?.items?.length || draft?.selectedProductId);
   const photoAsk = wantsPhotos(text);
   const photoImages = photoAsk ? pickProductPhotos(products, draft, text, []) : [];
+
+  if (engine.intent === 'ORDER_STATUS') {
+    const wanted = String(text).match(/ord[- ]?\d+/i);
+    const hit =
+      (pastOrders || []).find(
+        (o) => wanted && String(o.orderNumber || '').toLowerCase().includes(wanted[0].toLowerCase().replace(/\s/g, ''))
+      ) || (pastOrders || [])[0];
+    const reply = hit
+      ? `${hit.orderNumber} abhi ${hit.status} hai.${hit.deliveryAddress ? ` Address: ${hit.deliveryAddress}.` : ''}`
+      : 'Is number se matching order nahi mila. Order number dobara bhej dein.';
+    return {
+      reply,
+      skipped: false,
+      settings,
+      order: null,
+      model: GROQ_MODEL,
+      images: []
+    };
+  }
 
   if (engine.reply && (engine.skipGroq || engine.next === 'done' || photoAsk)) {
     return {
@@ -388,4 +413,4 @@ async function generateAgentReply(incomingText, options = {}) {
   };
 }
 
-module.exports = { GROQ_MODEL, generateAgentReply, buildSystemPrompt };
+module.exports = { GROQ_MODEL, generateAgentReply, buildSystemPrompt, isHumanHandoff };

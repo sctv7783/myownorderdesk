@@ -30,6 +30,7 @@ interface SimMessage {
 }
 
 export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, greeting, onRefreshData }) => {
+  const [sessionId, setSessionId] = useState(() => `sim_${Date.now()}`);
   const [customerPhone, setCustomerPhone] = useState('+92 333 7788990');
   const [customerName, setCustomerName] = useState('Kamran Tariq');
   const [inputMessage, setInputMessage] = useState('');
@@ -74,10 +75,14 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, gr
         headers: authHeaders(tenant.id),
         body: JSON.stringify({
           message: text,
+          sessionId,
           customerPhone,
           customerName,
           businessName: tenant.name,
-          greeting
+          greeting,
+          history: messages
+            .filter((m) => m.id !== 'init_1' && !String(m.id).startsWith('init_'))
+            .map((m) => ({ sender: m.sender, text: m.text }))
         })
       });
 
@@ -118,16 +123,27 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, gr
     }
   };
 
-  const handleClear = () => {
+  const handleClear = async () => {
+    const nextSession = `sim_${Date.now()}`;
+    setSessionId(nextSession);
     setMessages([
       {
         id: `init_${Date.now()}`,
         sender: 'AI',
-        text: `Wa Alaikum Assalam! Ji, batayein.`,
+        text: `Wa Alaikum Assalam! Ji, batayein ${tenant.name} se kya lena hai?`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       }
     ]);
     setLastApiLog(null);
+    try {
+      await fetch('/api/ai/simulate', {
+        method: 'POST',
+        headers: authHeaders(tenant.id),
+        body: JSON.stringify({ reset: true, sessionId: nextSession })
+      });
+    } catch {
+      /* local reset is enough */
+    }
   };
 
   return (
@@ -174,7 +190,7 @@ export const WhatsAppSimulator: React.FC<WhatsAppSimulatorProps> = ({ tenant, gr
                 className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-emerald-500"
               />
               <span className="text-[10px] text-slate-500 mt-1 block">
-                Scoped strictly to {tenant.name}. Isolated from other tenants.
+                Display only. Simulator draft is isolated — yeh number WhatsApp inbox / real order draft se mix nahi hota.
               </span>
             </div>
 

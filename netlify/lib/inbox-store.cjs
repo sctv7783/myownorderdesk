@@ -152,19 +152,24 @@ function mergeConvStates(states) {
     for (const conv of state?.conversations || []) {
       if (!conv) continue;
       const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+      if (phone.startsWith('sim') || String(conv.customerPhone || '').startsWith('sim:')) continue;
       const prev = (conv.id && map.get(conv.id)) || (phone && byPhone.get(phone));
       const next =
-        prev && new Date(prev.lastMessageAt || 0) > new Date(conv.lastMessageAt || 0) ? prev : conv;
+        prev && new Date(prev.lastMessageAt || 0) > new Date(conv.lastMessageAt || 0)
+          ? { ...conv, ...prev }
+          : { ...prev, ...conv };
+      if (prev?.id && next.id && prev.id !== next.id) map.delete(prev.id);
       if (next.id) map.set(next.id, next);
       if (phone) byPhone.set(phone, next);
     }
   }
+  const seenPhone = new Set();
   const merged = [];
-  const seen = new Set();
-  for (const conv of [...map.values(), ...byPhone.values()]) {
-    const key = conv.id || String(conv.customerPhone || '');
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
+  for (const conv of byPhone.size ? byPhone.values() : map.values()) {
+    const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+    const key = phone || conv.id;
+    if (!key || seenPhone.has(key)) continue;
+    seenPhone.add(key);
     merged.push(conv);
   }
   return merged.sort(
@@ -183,17 +188,19 @@ async function listConversations(tenantId, phoneNumberId) {
 }
 
 function collectMessages(state, conversationId) {
-  if (state.messagesByConv[conversationId]?.length) return state.messagesByConv[conversationId];
+  const out = [];
+  if (state.messagesByConv[conversationId]?.length) {
+    out.push(...state.messagesByConv[conversationId]);
+  }
   const conv = (state.conversations || []).find((c) => c.id === conversationId);
-  if (!conv) return [];
-  const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+  const phone = String(conv?.customerPhone || '').replace(/\D/g, '');
   for (const other of state.conversations || []) {
     const otherPhone = String(other.customerPhone || '').replace(/\D/g, '');
     if (phone && otherPhone && phone === otherPhone && state.messagesByConv[other.id]?.length) {
-      return state.messagesByConv[other.id];
+      out.push(...state.messagesByConv[other.id]);
     }
   }
-  return [];
+  return out;
 }
 
 async function listMessages(tenantId, conversationId, phoneNumberId) {
@@ -205,15 +212,32 @@ async function listMessages(tenantId, conversationId, phoneNumberId) {
   ]);
   const listed = await loadAllInboxStates();
   const states = [...named, ...listed];
+  let customerPhone = '';
+  for (const state of states) {
+    const conv = (state.conversations || []).find((c) => c.id === conversationId);
+    if (conv?.customerPhone) {
+      customerPhone = String(conv.customerPhone).replace(/\D/g, '');
+      break;
+    }
+  }
   const seen = new Set();
   const merged = [];
   for (const state of states) {
-    for (const msg of collectMessages(state, conversationId)) {
-      if (!msg) continue;
-      const key = msg.whatsappMessageId || msg.id || `${msg.sender}:${msg.text}:${msg.createdAt}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(msg);
+    const ids = new Set([conversationId]);
+    if (customerPhone) {
+      for (const conv of state.conversations || []) {
+        const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+        if (phone && phone === customerPhone && conv.id) ids.add(conv.id);
+      }
+    }
+    for (const id of ids) {
+      for (const msg of state.messagesByConv?.[id] || []) {
+        if (!msg) continue;
+        const key = msg.whatsappMessageId || msg.id || `${msg.sender}:${msg.text}:${msg.createdAt}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(msg);
+      }
     }
   }
   return merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());

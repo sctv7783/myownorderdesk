@@ -72,30 +72,23 @@ import {
 } from './whatsappLocalConfig';
 
 function mergeConversationLists(...lists: Conversation[][]) {
-  const map = new Map<string, Conversation>();
   const byPhone = new Map<string, Conversation>();
+  const byId = new Map<string, Conversation>();
   for (const list of lists) {
     for (const conv of list || []) {
       if (!conv) continue;
       const phone = String(conv.customerPhone || '').replace(/\D/g, '');
-      const prev = (conv.id && map.get(conv.id)) || (phone && byPhone.get(phone)) || null;
+      if (String(conv.customerPhone || '').startsWith('sim:')) continue;
+      const prev = (phone && byPhone.get(phone)) || (conv.id && byId.get(conv.id)) || null;
       const next =
         prev && new Date(prev.lastMessageAt || 0).getTime() > new Date(conv.lastMessageAt || 0).getTime()
-          ? prev
-          : conv;
-      if (next.id) map.set(next.id, next);
+          ? { ...conv, ...prev }
+          : { ...prev, ...conv };
       if (phone) byPhone.set(phone, next);
+      if (next.id) byId.set(next.id, next);
     }
   }
-  const seen = new Set<string>();
-  const merged: Conversation[] = [];
-  for (const conv of [...map.values(), ...byPhone.values()]) {
-    const key = conv.id || String(conv.customerPhone || '');
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    merged.push(conv);
-  }
-  return merged.sort(
+  return [...(byPhone.size ? byPhone.values() : byId.values())].sort(
     (a, b) => new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime()
   );
 }
@@ -492,11 +485,15 @@ export default function App() {
         setConversations(prev => {
           const prevStamp = prev[0]?.lastMessageAt || '';
           const nextStamp = list[0]?.lastMessageAt || '';
-          if (prev.length === list.length && prevStamp === nextStamp) return prev;
+          const prevText = prev[0]?.lastMessageText || '';
+          const nextText = list[0]?.lastMessageText || '';
+          if (prev.length === list.length && prevStamp === nextStamp && prevText === nextText) return prev;
           return list;
         });
         setSelectedConvId(prev => {
-          if (prev && list.some((c: any) => c.id === prev)) return prev;
+          if (!prev) return list[0]?.id || prev;
+          const still = list.find((c: any) => c.id === prev);
+          if (still) return prev;
           return list[0]?.id || prev;
         });
       } catch {
@@ -544,18 +541,41 @@ export default function App() {
     }
 
     let cancelled = false;
+    setMessages([]);
 
     async function loadMessages() {
       try {
-        const res = await fetch(
-          `/api/conversations/${selectedConvId}/messages?tenantId=${encodeURIComponent(currentTenant!.id)}`,
-          {
-          headers: authHeaders(currentTenant!.id)
+        const headers = authHeaders(currentTenant!.id);
+        const tid = encodeURIComponent(currentTenant!.id);
+        const urls = [
+          `/api/conversations/${selectedConvId}/messages?tenantId=${tid}`,
+          `/api/inbox/${selectedConvId}/messages?tenantId=${tid}`,
+          `/.netlify/functions/inbox/${selectedConvId}/messages?tenantId=${tid}`
+        ];
+        const batches: any[] = [];
+        for (const url of urls) {
+          const res = await fetch(url, { headers });
+          const raw = await res.text();
+          if (!res.ok || !raw || raw.trimStart().startsWith('<')) continue;
+          const data = JSON.parse(raw);
+          const list = Array.isArray(data) ? data : data?.messages || [];
+          if (list.length) batches.push(list);
+        }
+        if (cancelled) return;
+        setMessages(prev => {
+          const map = new Map<string, any>();
+          for (const msg of [...prev, ...batches.flat()]) {
+            if (!msg) continue;
+            const key = msg.whatsappMessageId || msg.id || `${msg.sender}:${msg.text}:${msg.createdAt}`;
+            const existing = map.get(key);
+            if (!existing || new Date(msg.createdAt || 0).getTime() >= new Date(existing.createdAt || 0).getTime()) {
+              map.set(key, msg);
+            }
+          }
+          return [...map.values()].sort(
+            (a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+          );
         });
-        const raw = await res.text();
-        if (raw.trimStart().startsWith('<')) return;
-        const data = JSON.parse(raw);
-        if (!cancelled) setMessages(data.messages || []);
       } catch (err) {
         console.error('Error loading messages:', err);
       }

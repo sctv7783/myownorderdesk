@@ -1,5 +1,5 @@
 const { generateAgentReply, GROQ_MODEL } = require('../lib/groq-agent.cjs');
-const { appendMessage } = require('../lib/conversations.cjs');
+const { clearDraft } = require('../lib/order-engine.cjs');
 const { resolveBusinessId } = require('../lib/business.cjs');
 
 function json(statusCode, payload) {
@@ -27,25 +27,35 @@ exports.handler = async function handler(event) {
 
   const body = parseBody(event);
   const tenantId = await resolveBusinessId(event, body);
+  const sessionId = String(body.sessionId || `sim_${Date.now()}`).slice(0, 80);
+
+  if (body.reset) {
+    await clearDraft(tenantId, { customerPhone: `sim:${sessionId}`, conversationId: sessionId, isolated: true });
+    return json(200, { success: true, reset: true, sessionId });
+  }
+
   const message = String(body.message || '').trim();
   if (!message) return json(400, { success: false, error: 'Message text is required.' });
 
   const customerName = body.customerName || 'Simulated Customer';
-  const customerPhone = body.customerPhone || '+92 300 0000000';
-
-  const savedIn = await appendMessage(tenantId, {
-    customerPhone,
-    customerName,
-    sender: 'CUSTOMER',
-    text: message
-  });
+  const customerPhone = `sim:${sessionId}`;
+  const history = Array.isArray(body.history)
+    ? body.history.map((row) => ({
+        sender: row.sender === 'CUSTOMER' ? 'CUSTOMER' : 'AI',
+        text: String(row.text || ''),
+        createdAt: row.createdAt || new Date().toISOString()
+      }))
+    : [];
 
   const result = await generateAgentReply(message, {
     tenantId,
     customerName,
     customerPhone,
     businessName: body.businessName,
-    conversationId: savedIn?.conversation?.id
+    conversationId: sessionId,
+    isolated: true,
+    persistOrder: true,
+    history
   });
 
   const aiResponse =
@@ -56,22 +66,16 @@ exports.handler = async function handler(event) {
     .join('\n');
   const combined = photoNotes ? `${photoNotes}\n${aiResponse}` : aiResponse;
 
-  await appendMessage(tenantId, {
-    customerPhone,
-    customerName,
-    sender: 'AI',
-    text: combined
-  });
-
   return json(200, {
     success: true,
-    conversationId: savedIn?.conversation?.id || null,
+    conversationId: sessionId,
     userMessage: message,
     aiResponse: combined,
     images: result.images || [],
     model: GROQ_MODEL,
     groqConfigured: Boolean(process.env.GROQ_API_KEY),
     handoff: Boolean(result.handoff),
-    skipped: Boolean(result.skipped)
+    skipped: Boolean(result.skipped),
+    isolated: true
   });
 };
