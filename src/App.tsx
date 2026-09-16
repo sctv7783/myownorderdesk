@@ -71,6 +71,35 @@ import {
   localConfigToAccount
 } from './whatsappLocalConfig';
 
+function mergeConversationLists(...lists: Conversation[][]) {
+  const map = new Map<string, Conversation>();
+  const byPhone = new Map<string, Conversation>();
+  for (const list of lists) {
+    for (const conv of list || []) {
+      if (!conv) continue;
+      const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+      const prev = (conv.id && map.get(conv.id)) || (phone && byPhone.get(phone)) || null;
+      const next =
+        prev && new Date(prev.lastMessageAt || 0).getTime() > new Date(conv.lastMessageAt || 0).getTime()
+          ? prev
+          : conv;
+      if (next.id) map.set(next.id, next);
+      if (phone) byPhone.set(phone, next);
+    }
+  }
+  const seen = new Set<string>();
+  const merged: Conversation[] = [];
+  for (const conv of [...map.values(), ...byPhone.values()]) {
+    const key = conv.id || String(conv.customerPhone || '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(conv);
+  }
+  return merged.sort(
+    (a, b) => new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime()
+  );
+}
+
 function defaultAgentSettings(tenantId: string): AgentSettings {
   return {
     id: `ai_settings_${tenantId}`,
@@ -317,6 +346,7 @@ export default function App() {
         ordersRes,
         convsRes,
         inboxRes,
+        chatsRes,
         productsRes,
         customersRes,
         notifsRes,
@@ -329,6 +359,7 @@ export default function App() {
         safeFetch('/api/orders'),
         safeFetch(`/api/conversations?tenantId=${encodeURIComponent(tenantId)}`),
         safeFetch(`/api/inbox?tenantId=${encodeURIComponent(tenantId)}`),
+        safeFetch(`/api/chats?tenantId=${encodeURIComponent(tenantId)}`),
         safeFetch('/api/products'),
         safeFetch('/api/customers'),
         safeFetch('/api/notifications'),
@@ -340,11 +371,11 @@ export default function App() {
       ]);
 
       let loadedOrders = Array.isArray(ordersRes) ? ordersRes : (ordersRes?.orders || []);
-      let loadedConvs = Array.isArray(convsRes) ? convsRes : (convsRes?.conversations || []);
-      const inboxConvs = Array.isArray(inboxRes) ? inboxRes : (inboxRes?.conversations || []);
-      if ((!loadedConvs.length || loadedConvs.length < inboxConvs.length) && inboxConvs.length) {
-        loadedConvs = inboxConvs;
-      }
+      let loadedConvs = mergeConversationLists(
+        Array.isArray(convsRes) ? convsRes : (convsRes?.conversations || []),
+        Array.isArray(inboxRes) ? inboxRes : (inboxRes?.conversations || []),
+        Array.isArray(chatsRes) ? chatsRes : (chatsRes?.conversations || [])
+      );
       const loadedProducts = Array.isArray(productsRes) ? productsRes : (productsRes?.products || []);
       let loadedCustomers = Array.isArray(customersRes) ? customersRes : (customersRes?.customers || []);
       const loadedNotifs = Array.isArray(notifsRes) ? notifsRes : (notifsRes?.notifications || []);
@@ -388,7 +419,7 @@ export default function App() {
       }
 
       if (ordersRes || loadedOrders.length) setOrders(loadedOrders);
-      if (convsRes || loadedConvs.length) setConversations(loadedConvs);
+      if (convsRes || inboxRes || chatsRes || loadedConvs.length) setConversations(loadedConvs);
       if (productsRes) setProducts(loadedProducts);
       if (customersRes || loadedCustomers.length) setCustomers(loadedCustomers);
       if (notifsRes) setNotifications(loadedNotifs);
@@ -436,29 +467,24 @@ export default function App() {
 
     const pollInbox = async () => {
       try {
-        const res = await fetch(`/api/conversations?tenantId=${encodeURIComponent(currentTenant.id)}`, {
-          headers: authHeaders(currentTenant.id)
-        });
-        const raw = await res.text();
-        let data: any = null;
-        try {
-          data = raw && !raw.trimStart().startsWith('<') ? JSON.parse(raw) : null;
-        } catch {
-          data = null;
-        }
-        let list = Array.isArray(data) ? data : data?.conversations || [];
-        if (!Array.isArray(list) || !list.length) {
-          const inboxRes = await fetch(`/api/inbox?tenantId=${encodeURIComponent(currentTenant.id)}`, {
-            headers: authHeaders(currentTenant.id)
-          });
-          const inboxRaw = await inboxRes.text();
-          if (inboxRes.ok && inboxRaw && !inboxRaw.trimStart().startsWith('<')) {
-            const inboxData = JSON.parse(inboxRaw);
-            const inboxList = Array.isArray(inboxData) ? inboxData : inboxData?.conversations || [];
-            if (Array.isArray(inboxList) && inboxList.length) list = inboxList;
+        const pull = async (url: string) => {
+          const res = await fetch(url, { headers: authHeaders(currentTenant.id) });
+          const raw = await res.text();
+          if (!res.ok || !raw || raw.trimStart().startsWith('<')) return [];
+          try {
+            const data = JSON.parse(raw);
+            return Array.isArray(data) ? data : data?.conversations || [];
+          } catch {
+            return [];
           }
-        }
-        if (cancelled || !Array.isArray(list)) return;
+        };
+        const tid = encodeURIComponent(currentTenant.id);
+        const list = mergeConversationLists(
+          await pull(`/api/conversations?tenantId=${tid}`),
+          await pull(`/api/inbox?tenantId=${tid}`),
+          await pull(`/api/chats?tenantId=${tid}`)
+        );
+        if (cancelled || !list.length) return;
         setConversations(prev => {
           const prevStamp = prev[0]?.lastMessageAt || '';
           const nextStamp = list[0]?.lastMessageAt || '';
@@ -687,7 +713,7 @@ export default function App() {
   const handleDeleteProduct = async (productId: string) => {
     if (!currentTenant) return;
     try {
-      const res = await fetch(`/api/products/${productId}`, {
+      const res = await fetch(`/api/products/${encodeURIComponent(productId)}`, {
         method: 'DELETE',
         headers: authHeaders(currentTenant.id)
       });

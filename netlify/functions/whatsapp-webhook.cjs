@@ -13,7 +13,7 @@ const { loadConfig, loadConfigByPhone } = require('../lib/whatsapp-store.cjs');
 const { markMessageAsRead, sendWhatsAppText, sendWhatsAppImage } = require('../lib/meta-graph.cjs');
 const { generateAgentReply } = require('../lib/groq-agent.cjs');
 const { appendMessage } = require('../lib/conversations.cjs');
-const { getBusiness, findBusinessIdByPhone } = require('../lib/business.cjs');
+const { getBusiness, findBusinessIdByPhone, listBusinesses } = require('../lib/business.cjs');
 const { voiceToText, mediaIdFromMessage } = require('../lib/whatsapp-voice.cjs');
 
 async function incomingFromMessage(msg, accessToken) {
@@ -135,11 +135,16 @@ async function handleIncoming(payload) {
       if (!messages.length) continue;
 
       const creds = await resolveCreds(phoneNumberId);
-      const tenantId =
+      let tenantId =
         creds?.tenantId ||
         (await findBusinessIdByPhone(phoneNumberId)) ||
         (await findBusinessIdByPhone(creds?.phoneNumberId)) ||
-        'unmapped';
+        '';
+      if (!tenantId || tenantId === 'unmapped') {
+        const stores = await listBusinesses();
+        if (stores.length === 1) tenantId = stores[0].id;
+        else tenantId = 'unmapped';
+      }
       if (tenantId === 'unmapped') {
         console.warn('[Webhook] No store mapped for WhatsApp phone', phoneNumberId, '- saving to WABA inbox anyway');
       }

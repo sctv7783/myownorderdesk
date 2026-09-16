@@ -115,18 +115,19 @@ async function appendMessage(tenantId, data) {
   return { conversation: conv, message: msg, persisted: true };
 }
 
-async function listConversations(tenantId, phoneNumberId) {
-  const state = await loadInbox(tenantId);
-  const waba = await loadWabaInbox(phoneNumberId);
+function mergeConvStates(states) {
   const map = new Map();
   const byPhone = new Map();
-  for (const conv of [...(waba.conversations || []), ...(state.conversations || [])]) {
-    if (!conv) continue;
-    const phone = String(conv.customerPhone || '').replace(/\D/g, '');
-    const prev = (conv.id && map.get(conv.id)) || (phone && byPhone.get(phone));
-    const next = prev && new Date(prev.lastMessageAt || 0) > new Date(conv.lastMessageAt || 0) ? prev : conv;
-    if (next.id) map.set(next.id, next);
-    if (phone) byPhone.set(phone, next);
+  for (const state of states) {
+    for (const conv of state?.conversations || []) {
+      if (!conv) continue;
+      const phone = String(conv.customerPhone || '').replace(/\D/g, '');
+      const prev = (conv.id && map.get(conv.id)) || (phone && byPhone.get(phone));
+      const next =
+        prev && new Date(prev.lastMessageAt || 0) > new Date(conv.lastMessageAt || 0) ? prev : conv;
+      if (next.id) map.set(next.id, next);
+      if (phone) byPhone.set(phone, next);
+    }
   }
   const merged = [];
   const seen = new Set();
@@ -137,8 +138,18 @@ async function listConversations(tenantId, phoneNumberId) {
     merged.push(conv);
   }
   return merged.sort(
-    (a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
+    (a, b) => new Date(b.lastMessageAt || 0).getTime() - new Date(a.lastMessageAt || 0).getTime()
   );
+}
+
+async function listConversations(tenantId, phoneNumberId) {
+  const phones = [...new Set([phoneNumberId, process.env.META_PHONE_NUMBER_ID].filter(Boolean))];
+  const tenants = [...new Set([tenantId, 'unmapped'].filter(Boolean))];
+  const states = await Promise.all([
+    ...tenants.map((id) => loadInbox(id)),
+    ...phones.map((id) => loadWabaInbox(id))
+  ]);
+  return mergeConvStates(states);
 }
 
 function collectMessages(state, conversationId) {
@@ -156,18 +167,22 @@ function collectMessages(state, conversationId) {
 }
 
 async function listMessages(tenantId, conversationId, phoneNumberId) {
-  const state = await loadInbox(tenantId);
-  const local = collectMessages(state, conversationId);
-  const waba = await loadWabaInbox(phoneNumberId);
-  const extra = collectMessages(waba, conversationId);
+  const phones = [...new Set([phoneNumberId, process.env.META_PHONE_NUMBER_ID].filter(Boolean))];
+  const tenants = [...new Set([tenantId, 'unmapped'].filter(Boolean))];
+  const states = await Promise.all([
+    ...tenants.map((id) => loadInbox(id)),
+    ...phones.map((id) => loadWabaInbox(id))
+  ]);
   const seen = new Set();
   const merged = [];
-  for (const msg of [...local, ...extra]) {
-    if (!msg) continue;
-    const key = msg.whatsappMessageId || msg.id || `${msg.sender}:${msg.text}:${msg.createdAt}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(msg);
+  for (const state of states) {
+    for (const msg of collectMessages(state, conversationId)) {
+      if (!msg) continue;
+      const key = msg.whatsappMessageId || msg.id || `${msg.sender}:${msg.text}:${msg.createdAt}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(msg);
+    }
   }
   return merged.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 }

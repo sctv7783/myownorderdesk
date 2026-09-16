@@ -10,7 +10,8 @@ const {
   formatDraftForPrompt,
   stripRepeatedGreeting,
   searchProducts,
-  looksLikeCatalogDump
+  looksLikeCatalogDump,
+  wantsPhotos
 } = require('./order-engine.cjs');
 
 function normalizePhone(phone) {
@@ -22,17 +23,6 @@ function isHumanHandoff(text) {
   return /\b(human staff|live agent|real (person|human|insaan)|manager se baat|staff se baat|complaint against)\b/.test(
     t
   );
-}
-
-function wantsPhotos(text) {
-  return /photo|photos|pic\b|pics\b|picture|image|images|tasveer|tasvir|photo bhejo|pic bhejo|send (me )?(a )?photo|picture bhejo|📷|📸/i.test(
-    String(text || '')
-  );
-}
-
-function publicImageUrl(url) {
-  const value = String(url || '').trim();
-  return /^https?:\/\//i.test(value) ? value : '';
 }
 
 function pickProductPhotos(products, draft, text, names) {
@@ -243,16 +233,32 @@ async function generateAgentReply(incomingText, options = {}) {
     .map((m) => `${m.sender}: ${m.text}`)
     .join('\n');
   const continuing = Boolean(historyText || draft?.items?.length || draft?.selectedProductId);
-  const orderStep = ['QUANTITY', 'NAME', 'ADDRESS', 'CONFIRMATION'].includes(String(draft?.awaiting || ''));
+  const photoAsk = wantsPhotos(text);
 
-  if ((engine.skipGroq && engine.reply) || (engine.next === 'done' && engine.reply) || (orderStep && engine.reply)) {
+  if (photoAsk) {
+    const images = pickProductPhotos(products, draft, text, []);
+    const name = draft?.selectedProductName || images[0]?.caption?.split(' — ')[0] || '';
+    const reply = images.length
+      ? `${name || 'Product'} ki photos.`
+      : `${name || 'Product'} ki photo catalog mein HTTPS image nahi hai. Dashboard pe product photos add karein.`;
+    return {
+      reply: stripRepeatedGreeting(reply),
+      skipped: false,
+      settings,
+      order: engine.order || null,
+      model: GROQ_MODEL,
+      images
+    };
+  }
+
+  if ((engine.skipGroq && engine.reply) || (engine.next === 'done' && engine.reply)) {
     return {
       reply: stripRepeatedGreeting(engine.reply),
       skipped: false,
       settings,
       order: engine.order || null,
       model: GROQ_MODEL,
-      images: wantsPhotos(text) ? pickProductPhotos(products, draft, text, []) : []
+      images: []
     };
   }
 

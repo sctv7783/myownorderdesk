@@ -29,7 +29,10 @@ async function requireStoreUser(event, body, options = {}) {
   const tenantId = await resolveBusinessId(event, body);
   const token = readAccessToken(event, body);
   if (!tenantId) return { ok: false, status: 401, error: 'Store session required' };
-  if (!token) return { ok: false, status: 401, error: 'Login required' };
+  if (!token) {
+    if (options.allowTenantFallback && tenantId) return { ok: true, tenantId, user: null };
+    return { ok: false, status: 401, error: 'Login required' };
+  }
 
   const cached = authCache.get(token);
   if (cached && Date.now() - cached.at < 120000) {

@@ -143,7 +143,7 @@ function extractQuantity(text) {
   );
   if (explicit) {
     const qty = Number(explicit[1]);
-    if (qty >= 1 && qty <= 50) return qty;
+    if (qty >= 1 && qty <= 9999) return qty;
   }
   const lower = raw.toLowerCase();
   for (const [word, qty] of Object.entries(QTY_WORDS)) {
@@ -181,8 +181,16 @@ function isStockQuery(text) {
   return /\bstock\b|available hai|available hain|hai kya\b/.test(t) && !isPurchaseIntent(t);
 }
 
+function wantsPhotos(text) {
+  const t = String(text || '').toLowerCase();
+  return /photo|photos|pic\b|pics\b|picture|image|images|tasveer|tasvir|📷|📸|bhyj|bhejo|bhejna|bhyjna|bhyjo/.test(
+    t
+  ) && /photo|pic|tasveer|tasvir|image|picture|📷|📸/.test(t);
+}
+
 function isPurchaseIntent(text) {
-  return /\b(chahiye|chahiyein|lena hai|order kar|mangwana|bhej do|bhej dein|de dein|buy|i want|ye wala|order kardo|order kar do)\b/i.test(
+  if (wantsPhotos(text)) return false;
+  return /\b(chahiye|chahiyein|lena hai|order kar|mangwana|buy|i want|ye wala|order kardo|order kar do)\b/i.test(
     String(text || '')
   );
 }
@@ -501,6 +509,19 @@ async function applyCustomerTurn({
     return done(null, { skipGroq: false });
   }
 
+  if (wantsPhotos(message)) {
+    const resolved = resolveProductMention(products, message);
+    if (resolved.matches.length === 1) {
+      draft.selectedProductId = resolved.matches[0].id;
+      draft.selectedProductName = resolved.matches[0].name;
+    }
+    return done(null, { skipGroq: false });
+  }
+
+  if (isQuantityOnly(message) && Number(message) === 0) {
+    return done('Kam az kam 1 piece likhein.');
+  }
+
   if (isCancel(message)) {
     draft = { ...emptyDraft(), greeted: true };
     await saveDraft(tenantId, draft, refs);
@@ -694,16 +715,16 @@ async function applyCustomerTurn({
   draft.awaiting = nextMissing(draft);
 
   if (draft.awaiting === 'QUANTITY' && draft.selectedProductName) {
-    return done(`Ji, ${draft.selectedProductName} ke kitne pieces chahiye?`);
+    return done(`Ji, ${draft.selectedProductName} ke kitne pieces chahiye?`, { skipGroq: false });
   }
 
   if (draft.awaiting === 'NAME') {
-    return done('Order book karne se pehle aapka name bata dein.');
+    return done('Order book karne se pehle aapka name bata dein.', { skipGroq: false });
   }
 
   if (draft.awaiting === 'ADDRESS' && draft.items.length) {
     const listed = draft.items.map((i) => `${i.quantity}x ${i.productName}`).join(', ');
-    return done(`Ji, ${listed} note kar liye. Delivery address bata dein.`);
+    return done(`Ji, ${listed} note kar liye. Delivery address bata dein.`, { skipGroq: false });
   }
 
   if (draft.awaiting === 'CONFIRMATION' && draft.items.length && draft.deliveryAddress) {
@@ -783,6 +804,7 @@ module.exports = {
   searchProducts,
   stripRepeatedGreeting,
   wantsCatalog,
+  wantsPhotos,
   isConfirmText,
   looksLikeCatalogDump,
   resolveCatalogNumber,

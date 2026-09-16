@@ -117,18 +117,75 @@ function toFullRow(tenantId, data) {
 }
 
 function mergeById(primary, secondary) {
-  const map = new Map();
+  const byId = new Map();
+  const byName = new Map();
   for (const item of [...secondary, ...primary]) {
     if (!item?.id && !item?.name) continue;
-    map.set(item.id || item.name, item);
+    const nameKey = String(item.name || '').toLowerCase().trim();
+    const prev = (item.id && byId.get(item.id)) || (nameKey && byName.get(nameKey)) || null;
+    const preferUuid = (a, b) => {
+      if (a?.id && isUuid(a.id)) return a.id;
+      if (b?.id && isUuid(b.id)) return b.id;
+      return a?.id || b?.id || nameKey;
+    };
+    const next = prev
+      ? {
+          ...prev,
+          ...item,
+          id: preferUuid(item, prev),
+          imageUrls: publicImageUrls({
+            imageUrl: item.imageUrl || prev.imageUrl,
+            imageUrls: [...(prev.imageUrls || []), ...(item.imageUrls || [])]
+          })
+        }
+      : item;
+    if (next.id) byId.set(next.id, next);
+    if (prev?.id && prev.id !== next.id) byId.delete(prev.id);
+    if (nameKey) byName.set(nameKey, next);
   }
-  return [...map.values()].sort(
+  const seen = new Set();
+  const out = [];
+  for (const item of [...byId.values(), ...byName.values()]) {
+    const key = item.id || String(item.name || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out.sort(
     (a, b) => new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime()
   );
 }
 
+async function loadDeleted(tenantId) {
+  const store = await getBlobStore();
+  if (!store || !tenantId) return { ids: [], names: [] };
+  try {
+    const data = await store.get(`deleted:${tenantId}`, { type: 'json' });
+    return {
+      ids: Array.isArray(data?.ids) ? data.ids : [],
+      names: Array.isArray(data?.names) ? data.names : []
+    };
+  } catch {
+    return { ids: [], names: [] };
+  }
+}
+
+async function saveDeleted(tenantId, data) {
+  const store = await getBlobStore();
+  if (!store || !tenantId) return;
+  await store.setJSON(`deleted:${tenantId}`, data);
+}
+
+function isTombstoned(product, deleted) {
+  const ids = new Set((deleted.ids || []).map(String));
+  const names = new Set((deleted.names || []).map((n) => String(n).toLowerCase().trim()));
+  if (product?.id && ids.has(String(product.id))) return true;
+  if (product?.name && names.has(String(product.name).toLowerCase().trim())) return true;
+  return false;
+}
+
 async function listProducts(tenantId) {
-  const [blob, dbRes] = await Promise.all([
+  const [blob, dbRes, deleted] = await Promise.all([
     loadBlobProducts(tenantId),
     getSupabaseConfig() && tenantId
       ? sbSelect('products', {
@@ -136,10 +193,11 @@ async function listProducts(tenantId) {
           business_id: `eq.${tenantId}`,
           order: 'created_at.desc'
         })
-      : Promise.resolve({ ok: false, rows: [] })
+      : Promise.resolve({ ok: false, rows: [] }),
+    loadDeleted(tenantId)
   ]);
   const fromDb = dbRes.ok ? dbRes.rows.map((row) => mapProduct(row, tenantId)).filter(Boolean) : [];
-  return mergeById(fromDb, blob);
+  return mergeById(fromDb, blob).filter((p) => !isTombstoned(p, deleted));
 }
 
 async function getProduct(tenantId, productId) {
@@ -188,6 +246,12 @@ async function createProduct(tenantId, data) {
   };
   const existing = await loadBlobProducts(tenantId);
   await saveBlobProducts(tenantId, [product, ...existing.filter((p) => p.id !== product.id && p.name !== product.name)]);
+  const deleted = await loadDeleted(tenantId);
+  const nameKey = String(product.name || '').toLowerCase().trim();
+  await saveDeleted(tenantId, {
+    ids: (deleted.ids || []).filter((id) => id !== product.id),
+    names: (deleted.names || []).filter((n) => String(n).toLowerCase().trim() !== nameKey)
+  });
   if (!saved && !getSupabaseConfig()) {
     return { ok: false, error: 'Supabase is not configured on Netlify.' };
   }
@@ -237,11 +301,49 @@ async function updateProduct(tenantId, productId, data) {
 }
 
 async function deleteProduct(tenantId, productId) {
-  if (getSupabaseConfig() && isUuid(productId)) {
-    await sbDelete('products', { id: `eq.${productId}`, business_id: `eq.${tenantId}` });
+  const wanted = decodeURIComponent(String(productId || '')).trim();
+  const blobAll = await loadBlobProducts(tenantId);
+  const fromBlob = blobAll.find((p) => p.id === wanted || String(p.name || '').toLowerCase() === wanted.toLowerCase());
+  let fromDb = null;
+  if (getSupabaseConfig() && tenantId) {
+    if (isUuid(wanted)) {
+      const byId = await sbSelect('products', { select: '*', id: `eq.${wanted}`, business_id: `eq.${tenantId}` });
+      fromDb = byId.rows?.[0] ? mapProduct(byId.rows[0], tenantId) : null;
+    }
+    if (!fromDb) {
+      const byName = await sbSelect('products', {
+        select: '*',
+        business_id: `eq.${tenantId}`,
+        name: `eq.${fromBlob?.name || wanted}`
+      });
+      fromDb = byName.rows?.[0] ? mapProduct(byName.rows[0], tenantId) : null;
+    }
   }
-  const all = (await loadBlobProducts(tenantId)).filter((p) => p.id !== productId);
-  await saveBlobProducts(tenantId, all);
+  const target = fromDb || fromBlob;
+  const names = [...new Set([target?.name, fromBlob?.name, wanted].filter(Boolean))];
+  const ids = [...new Set([target?.id, fromBlob?.id, wanted].filter(Boolean))];
+
+  if (getSupabaseConfig() && tenantId) {
+    for (const id of ids) {
+      if (isUuid(id)) await sbDelete('products', { id: `eq.${id}`, business_id: `eq.${tenantId}` });
+    }
+    for (const name of names) {
+      await sbDelete('products', { business_id: `eq.${tenantId}`, name: `eq.${name}` });
+    }
+  }
+
+  const nameKeys = new Set(names.map((n) => String(n).toLowerCase().trim()));
+  const idKeys = new Set(ids.map(String));
+  await saveBlobProducts(
+    tenantId,
+    blobAll.filter((p) => !idKeys.has(String(p.id)) && !nameKeys.has(String(p.name || '').toLowerCase().trim()))
+  );
+
+  const deleted = await loadDeleted(tenantId);
+  await saveDeleted(tenantId, {
+    ids: [...new Set([...(deleted.ids || []), ...ids.map(String)])],
+    names: [...new Set([...(deleted.names || []), ...names])]
+  });
   return { ok: true };
 }
 
