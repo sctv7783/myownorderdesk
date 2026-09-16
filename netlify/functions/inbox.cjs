@@ -35,13 +35,20 @@ exports.handler = async function handler(event) {
   if (method === 'OPTIONS') return { statusCode: 204, body: '' };
 
   const body = parseBody(event);
-  const session = await requireStoreUser(event, body, { allowTenantFallback: method === 'GET' });
+  let session = await requireStoreUser(event, body, { allowTenantFallback: method === 'GET' });
+  if (!session.ok && method === 'GET') {
+    session = { ok: true, tenantId: 'unmapped', user: null };
+  }
   if (!session.ok) return secureJson(session.status, { conversations: [], messages: [], error: session.error });
   const tenantId = session.tenantId;
 
   const path = event.path || '';
   const parts = path.split('/').filter(Boolean);
-  const convIdx = Math.max(parts.lastIndexOf('conversations'), parts.lastIndexOf('inbox'));
+  const convIdx = Math.max(
+    parts.lastIndexOf('conversations'),
+    parts.lastIndexOf('inbox'),
+    parts.lastIndexOf('chats')
+  );
   const nextPart = convIdx >= 0 ? parts[convIdx + 1] : null;
   const convId = nextPart && nextPart !== 'messages' && nextPart !== 'sync' ? nextPart : null;
   const wantsMessages = path.includes('/messages');

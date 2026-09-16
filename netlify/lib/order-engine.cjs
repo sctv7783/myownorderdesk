@@ -1,6 +1,12 @@
 const { createOrder } = require('./orders-store.cjs');
 const { getSupabaseConfig, isUuid, sbSelect, sbInsert, sbUpdate } = require('./supabase-rest.cjs');
 
+const memoryDrafts = new Map();
+
+function resetMemoryDrafts() {
+  memoryDrafts.clear();
+}
+
 async function getDraftStore() {
   try {
     const { getStore } = require('@netlify/blobs');
@@ -25,6 +31,7 @@ function emptyDraft() {
     selectedProductName: null,
     pendingQuantity: null,
     deliveryAddress: '',
+    deliveryCity: '',
     customerName: '',
     paymentMethod: 'COD',
     notes: '',
@@ -32,6 +39,15 @@ function emptyDraft() {
     deliveryFee: 0,
     total: 0,
     awaiting: 'PRODUCT',
+    currentIntent: 'UNKNOWN',
+    lastIntent: null,
+    lastUserQuestion: null,
+    lastAssistantAction: null,
+    confirmationRequired: true,
+    orderConfirmed: false,
+    orderCreated: false,
+    confirmationVersion: 0,
+    lastGreetingSentAt: null,
     confirmed: false,
     greeted: false,
     summaryPresented: false,
@@ -61,6 +77,10 @@ function pickRicherDraft(...drafts) {
 
 async function loadDraft(tenantId, { customerPhone, conversationId } = {}) {
   const found = [];
+  const memConv = conversationId ? memoryDrafts.get(convKey(tenantId, conversationId)) : null;
+  const memPhone = memoryDrafts.get(phoneKey(tenantId, customerPhone));
+  if (memConv) found.push(normalizeDraft(memConv));
+  if (memPhone) found.push(normalizeDraft(memPhone));
   const store = await getDraftStore();
   if (store) {
     try {
@@ -92,6 +112,8 @@ async function loadDraft(tenantId, { customerPhone, conversationId } = {}) {
 
 async function saveDraft(tenantId, draft, { customerPhone, conversationId } = {}) {
   const next = { ...normalizeDraft(draft), updatedAt: new Date().toISOString() };
+  memoryDrafts.set(phoneKey(tenantId, customerPhone), next);
+  if (conversationId) memoryDrafts.set(convKey(tenantId, conversationId), next);
   const store = await getDraftStore();
   if (store) {
     await store.setJSON(phoneKey(tenantId, customerPhone), next);
@@ -120,8 +142,14 @@ async function saveDraft(tenantId, draft, { customerPhone, conversationId } = {}
   return next;
 }
 
-async function clearDraft(tenantId, refs) {
-  const kept = { ...emptyDraft(), greeted: true };
+async function clearDraft(tenantId, refs, extras = {}) {
+  const kept = {
+    ...emptyDraft(),
+    greeted: true,
+    lastOrderNumber: extras.lastOrderNumber || null,
+    orderCreated: Boolean(extras.lastOrderNumber),
+    lastGreetingSentAt: extras.lastGreetingSentAt || null
+  };
   return saveDraft(tenantId, kept, refs);
 }
 
@@ -138,16 +166,26 @@ function extractQuantity(text) {
     .replace(/\b\d+\s*(?:wala|wali|wale)\b/gi, ' ')
     .trim();
   if (!raw) return null;
-  const explicit = raw.match(
-    /(?:sirf|only|bs|just)?\s*(\d+)\s*(?:x|pcs?|pieces?|pair|pairs|qty|quantity|adad|dane|chahiye|chahiyein)?/i
+  if (looksLikeAddress(raw) && !isQuantityOnly(raw)) return null;
+  const cued = raw.match(
+    /(\d+)\s*(?:x|pcs?|pieces?|pair|pairs|qty|quantity|adad|dane|chahiye|chahiyein|kar do|kar dein)\b/i
   );
-  if (explicit) {
-    const qty = Number(explicit[1]);
+  if (cued) {
+    const qty = Number(cued[1]);
     if (qty >= 1 && qty <= 9999) return qty;
   }
-  const lower = raw.toLowerCase();
-  for (const [word, qty] of Object.entries(QTY_WORDS)) {
-    if (new RegExp(`(^|\\s)${word}(\\s|$)`, 'i').test(lower)) return qty;
+  if (isQuantityOnly(raw)) {
+    const n = Number(String(raw).replace(/[^\d]/g, ''));
+    if (n >= 1 && n <= 9999) return n;
+    const lower = raw.toLowerCase();
+    for (const [word, qty] of Object.entries(QTY_WORDS)) {
+      if (new RegExp(`(^|\\s)${word}(\\s|$)`, 'i').test(lower)) return qty;
+    }
+  }
+  const leading = raw.match(/^(?:sirf|only|bs|just)?\s*(\d+)\s+([a-z0-9].+)$/i);
+  if (leading && !looksLikeAddress(raw)) {
+    const qty = Number(leading[1]);
+    if (qty >= 1 && qty <= 9999) return qty;
   }
   return null;
 }
@@ -202,7 +240,50 @@ function isConfirmText(text) {
 }
 
 function isCancel(text) {
-  return /\b(cancel|rakh do|mat bhejo|order cancel|don't want)\b/i.test(String(text || ''));
+  return /\b(cancel|rakh do|mat bhejo|order cancel|don't want|cancel kar)\b/i.test(String(text || ''));
+}
+
+function isOrderStatusQuery(text) {
+  return /#?\s*ord[- ]?\d+|order\s*(#|no\.?|number)|kahan (hai|pohancha|pohncha|pohcha)|track(ing)?|status mera|mera order/i.test(
+    String(text || '')
+  );
+}
+
+function isGeneralQuery(text) {
+  const t = String(text || '');
+  if (isPurchaseIntent(t) || isQuantityOnly(t) || looksLikeAddress(t) || wantsPhotos(t) || isCancel(t)) {
+    return false;
+  }
+  return /kitne din|delivery time|eta|hours|timing|payment|cod\b|kahan deliver|policy|refund|warranty|kitne din mein/i.test(
+    t
+  );
+}
+
+function isUpdateQuantity(text) {
+  const t = String(text || '').toLowerCase();
+  return /\b(kar do|kar dein|update|change|badal|bana do)\b/.test(t) && extractQuantity(t) != null;
+}
+
+function stripGreetingPrefix(text) {
+  return String(text || '')
+    .replace(
+      /^(assalamu?[\s-]*alaikum|assalam[- ]?o[- ]?alaikum|wa\s*alaikum\s*assalam|salaam|salam|aoa|hello|hi|hey|slm)[\s!,.]*/i,
+      ''
+    )
+    .replace(/^[,:-]\s*/, '')
+    .trim();
+}
+
+function rememberedProduct(draft, products) {
+  if (draft.selectedProductId) {
+    const hit = (products || []).find((p) => p.id === draft.selectedProductId);
+    if (hit) return hit;
+  }
+  if (draft.items?.length) {
+    const last = draft.items[draft.items.length - 1];
+    return (products || []).find((p) => p.id === last.productId) || null;
+  }
+  return null;
 }
 
 function isQuantityOnly(text) {
@@ -251,6 +332,7 @@ function extractAddress(text, awaitingAddress) {
   if (explicit && explicit[1].trim().length >= 6) return explicit[1].trim();
   if (looksLikeAddress(raw)) return raw;
   if (awaitingAddress && raw.length >= 8 && !isConfirmText(raw) && !isQuantityOnly(raw) && !isCancel(raw)) {
+    if (extractQuantity(raw) && !looksLikeAddress(raw)) return '';
     return raw;
   }
   return '';
@@ -435,7 +517,6 @@ function nextMissing(draft) {
   if (!draft.items.length && !draft.selectedProductId) return 'PRODUCT';
   const qtyMissing = draft.items.some((item) => !item.quantity);
   if (!draft.items.length || qtyMissing) return 'QUANTITY';
-  if (isPlaceholderName(draft.customerName)) return 'NAME';
   if (!String(draft.deliveryAddress || '').trim()) return 'ADDRESS';
   return 'CONFIRMATION';
 }
@@ -480,19 +561,30 @@ async function applyCustomerTurn({
       historyForHydrate = historyForHydrate.slice(0, -1);
     }
   }
-  if (historyForHydrate.length) {
+  if (
+    historyForHydrate.length &&
+    !draft.items.length &&
+    !draft.selectedProductId &&
+    !draft.deliveryAddress
+  ) {
     draft = hydrateDraftFromHistory(draft, products, historyForHydrate);
   }
-  const greetedBefore =
-    Boolean(draft.greeted) ||
-    (Array.isArray(history) && history.some((m) => m.sender === 'CUSTOMER'));
-  if (greetedBefore) draft.greeted = true;
+  const priorCustomer = (Array.isArray(history) ? history : []).filter(
+    (m) => m.sender === 'CUSTOMER' && String(m.text || '').trim() !== message
+  );
+  const greetedBefore = Boolean(draft.greeted) || priorCustomer.length > 0;
+  if (priorCustomer.length) draft.greeted = true;
   if (!isPlaceholderName(customerName) && isPlaceholderName(draft.customerName)) {
     draft.customerName = customerName;
   }
   const fee = Number(deliveryFee || 0);
 
   const done = (reply, extra = {}) => {
+    draft.currentIntent = extra.intent || draft.currentIntent || 'UNKNOWN';
+    draft.lastIntent = draft.currentIntent;
+    draft.lastUserQuestion = message;
+    draft.lastAssistantAction = extra.action || (reply ? 'reply' : 'defer_to_groq');
+    draft.confirmationRequired = draft.awaiting === 'CONFIRMATION';
     draft = totals(draft, fee);
     return saveDraft(tenantId, draft, refs).then((saved) => ({
       draft: saved,
@@ -501,12 +593,22 @@ async function applyCustomerTurn({
       reply,
       order: extra.order || null,
       skipGroq: extra.skipGroq !== false,
-      greetedBefore
+      greetedBefore,
+      intent: saved.currentIntent
     }));
   };
 
   if (!message) {
-    return done(null, { skipGroq: false });
+    return done(null, { skipGroq: false, intent: 'UNKNOWN' });
+  }
+
+  if (isOrderStatusQuery(message)) {
+    draft.currentIntent = 'ORDER_STATUS';
+    return done(null, { skipGroq: false, intent: 'ORDER_STATUS', action: 'order_status' });
+  }
+
+  if (isGeneralQuery(message)) {
+    return done(null, { skipGroq: false, intent: 'GENERAL_QUERY', action: 'general_query' });
   }
 
   if (wantsPhotos(message)) {
@@ -515,15 +617,16 @@ async function applyCustomerTurn({
       draft.selectedProductId = resolved.matches[0].id;
       draft.selectedProductName = resolved.matches[0].name;
     }
-    return done(null, { skipGroq: false });
+    return done(null, { skipGroq: false, intent: 'PRODUCT_INQUIRY', action: 'send_photos' });
   }
 
-  if (isQuantityOnly(message) && Number(message) === 0) {
-    return done('Kam az kam 1 piece likhein.');
+  if (isQuantityOnly(message) && Number(String(message).replace(/[^\d]/g, '')) === 0) {
+    return done('Kam az kam 1 piece likhein.', { intent: 'UPDATE_QUANTITY' });
   }
 
   if (isCancel(message)) {
-    draft = { ...emptyDraft(), greeted: true };
+    const greetingAt = draft.lastGreetingSentAt;
+    draft = { ...emptyDraft(), greeted: true, lastGreetingSentAt: greetingAt };
     await saveDraft(tenantId, draft, refs);
     return {
       draft,
@@ -532,7 +635,8 @@ async function applyCustomerTurn({
       reply: 'Order cancel kar diya. Naya product bata dein.',
       order: null,
       skipGroq: true,
-      greetedBefore
+      greetedBefore,
+      intent: 'CANCEL_ORDER'
     };
   }
 
@@ -542,205 +646,251 @@ async function applyCustomerTurn({
       draft.awaiting = nextMissing(draft);
       const hint =
         draft.awaiting === 'QUANTITY'
-          ? 'Quantity kitni chahiye?'
-          : draft.awaiting === 'NAME'
-            ? 'Order se pehle aapka name bata dein.'
+          ? `Quantity kitni chahiye${draft.selectedProductName ? ` (${draft.selectedProductName})` : ''}?`
           : draft.awaiting === 'ADDRESS'
             ? 'Delivery address bata dein.'
             : draft.awaiting === 'CONFIRMATION'
               ? 'Order confirm kar doon?'
               : 'Ji, continue karein.';
-      return done(hint);
+      return done(hint, { intent: 'GREETING' });
     }
+    if (draft.greeted && draft.lastGreetingSentAt) {
+      return done('Ji, batayein.', { intent: 'GREETING' });
+    }
+    draft.lastGreetingSentAt = new Date().toISOString();
     const reply = maybeGreet(
       draft,
       message,
-      draft.greeted ? 'Ji, batayein.' : 'Ji, batayein aap kis product ke baare mein maloomat chahte hain?'
+      'Ji, batayein main aapki kya madad kar sakta hoon?'
     );
     draft.awaiting = 'PRODUCT';
-    return done(reply);
+    return done(reply, { intent: 'GREETING' });
   }
 
-  if (wantsCatalog(message)) {
+  let working = message;
+  if (hasGreeting(working) && !isGreetingOnly(working)) {
+    if (!draft.lastGreetingSentAt) draft.lastGreetingSentAt = new Date().toISOString();
+    working = stripGreetingPrefix(working) || working;
+  }
+
+  if (wantsCatalog(working)) {
     const active = (products || []).filter((p) => p.isActive !== false).slice(0, 40);
     const lines = active.map((p, i) => `${i + 1}) ${p.name} — Rs. ${unitPrice(p).toLocaleString()}`);
     const reply = maybeGreet(
       draft,
       message,
-      lines.length
-        ? `${lines.join('\n')}\n\nKaunsa item chahiye?`
-        : 'Catalog abhi empty hai.'
+      lines.length ? `${lines.join('\n')}\n\nKaunsa item chahiye?` : 'Catalog abhi empty hai.'
     );
     draft.awaiting = 'PRODUCT';
-    return done(reply);
+    return done(reply, { intent: 'PRODUCT_SEARCH' });
   }
 
-  if (draft.awaiting === 'CONFIRMATION' && isConfirmText(message) && draft.summaryPresented && draft.items.length && draft.deliveryAddress) {
+  const canConfirm =
+    draft.awaiting === 'CONFIRMATION' &&
+    draft.summaryPresented &&
+    draft.items.length &&
+    String(draft.deliveryAddress || '').trim() &&
+    isConfirmText(working);
+
+  if (isConfirmText(working) && extractQuantity(working) == null && !canConfirm) {
+    if (draft.orderCreated && draft.lastOrderNumber && !draft.items.length) {
+      return done(`Yeh order pehle se confirm hai: #${draft.lastOrderNumber}.`, {
+        intent: 'CONFIRM_ORDER'
+      });
+    }
+    if (!draft.items.length && !draft.selectedProductId) {
+      return done('Kya confirm karun? Product name bata dein.', { intent: 'CONFIRM_ORDER' });
+    }
+    draft.awaiting = nextMissing(draft);
+    if (draft.awaiting === 'QUANTITY') {
+      return done('Ji, quantity kitni chahiye? Misal ke taur par 2 pieces.', { intent: 'UPDATE_QUANTITY' });
+    }
+    if (draft.awaiting === 'ADDRESS') {
+      return done('Pehle delivery address bhej dein, phir confirm karunga.', { intent: 'PROVIDE_ADDRESS' });
+    }
+  }
+
+  if (canConfirm) {
     const blocked = draft.items
       .map((item) => {
         const product = (products || []).find((p) => p.id === item.productId);
-        if (!product) return null;
+        if (!product) return { ok: false, reply: `${item.productName} catalog se match nahi hua.` };
         return stockReply(product, item.quantity);
       })
       .find((row) => row && !row.ok);
     if (blocked) {
       draft.awaiting = 'QUANTITY';
       draft.summaryPresented = false;
-      return done(blocked.reply);
+      return done(blocked.reply, { intent: 'UPDATE_QUANTITY' });
     }
     if (!persistOrder) {
-      return done('Order ready hai, confirm ke baad place hoga.');
+      return done('Order ready hai, confirm ke baad place hoga.', { intent: 'CONFIRM_ORDER' });
     }
+    draft.confirmationVersion = Number(draft.confirmationVersion || 0) + 1;
     const created = await createOrder(tenantId, {
       customerName: draft.customerName || customerName,
       customerPhone,
       items: draft.items,
       deliveryAddress: draft.deliveryAddress,
-      notes: draft.notes,
+      notes: `${draft.notes || ''} conv:${conversationId || ''} v:${draft.confirmationVersion}`.trim(),
       paymentMethod: draft.paymentMethod || 'COD',
       deliveryFee: fee,
       status: 'CONFIRMED',
       source: 'whatsapp_ai'
     });
     if (!created?.ok || !created.order) {
-      return done('Maazrat, order create karte waqt issue aa gaya. Main dobara try karta hoon.');
+      return done('Maazrat, order create karte waqt issue aa gaya. Main dobara try karta hoon.', {
+        intent: 'CONFIRM_ORDER'
+      });
     }
-    const confirmedDraft = totals({ ...draft, confirmed: true }, fee);
-    const reply = formatSummary(confirmedDraft, {
-      confirmed: true,
-      orderNumber: created.order.orderNumber
-    });
-    await clearDraft(tenantId, refs);
+    const confirmedDraft = totals({ ...draft, confirmed: true, orderConfirmed: true, orderCreated: true }, fee);
+    const reply = created.duplicate
+      ? `Yeh order pehle se confirm hai: #${created.order.orderNumber}.`
+      : formatSummary(confirmedDraft, { confirmed: true, orderNumber: created.order.orderNumber });
+    await clearDraft(tenantId, refs, { lastOrderNumber: created.order.orderNumber });
     return {
-      draft: { ...emptyDraft(), greeted: true, lastOrderNumber: created.order.orderNumber },
+      draft: {
+        ...emptyDraft(),
+        greeted: true,
+        lastOrderNumber: created.order.orderNumber,
+        orderCreated: true
+      },
       cart: emptyDraft(),
       next: 'done',
-      reply: created.duplicate
-        ? `Yeh order pehle se confirm hai: #${created.order.orderNumber}.`
-        : reply,
+      reply,
       order: created.order,
       skipGroq: true,
-      greetedBefore
+      greetedBefore,
+      intent: 'CONFIRM_ORDER'
     };
   }
 
-  if (draft.awaiting === 'QUANTITY' && isConfirmText(message) && extractQuantity(message) == null) {
-    return done('Ji, quantity kitni chahiye? Misal ke taur par 2 pieces.');
+  const qty = extractQuantity(working);
+  const address = looksLikeAddress(working) || draft.awaiting === 'ADDRESS'
+    ? extractAddress(working, draft.awaiting === 'ADDRESS' || Boolean(draft.items.length))
+    : '';
+  if (address) {
+    draft.deliveryAddress = address;
+    const cityMatch = address.match(
+      /(lahore|karachi|islamabad|rawalpindi|faisalabad|multan|peshawar|sialkot|gujranwala|quetta|hyderabad)/i
+    );
+    if (cityMatch) draft.deliveryCity = cityMatch[1];
   }
 
-  if (draft.awaiting === 'NAME' || (draft.items.length && isPlaceholderName(draft.customerName) && !isQuantityOnly(message))) {
-    const named = extractPersonName(message);
-    const productHit = resolveProductMention(products, message);
-    if (named && productHit.matches.length === 0) {
-      draft.customerName = named;
-      draft.awaiting = nextMissing(draft);
-      if (draft.awaiting === 'ADDRESS') {
-        return done(`Shukriya ${named}! Delivery address bata dein (ghar, gali, area, city).`);
-      }
-    } else if (draft.awaiting === 'NAME' && productHit.matches.length === 0) {
-      return done('Order book karne se pehle aapka name bata dein.');
-    }
-  }
-
-  const qty = extractQuantity(message);
-  const address = extractAddress(message, draft.awaiting === 'ADDRESS');
-  if (address) draft.deliveryAddress = address;
-
-  const multi = findMultipleItems(products, message);
+  const multi = findMultipleItems(products, working);
   if (multi.length) {
     for (const row of multi) {
       const check = stockReply(row.product, row.quantity || 1);
-      if (!check.ok) return done(maybeGreet(draft, message, check.reply));
+      if (!check.ok) return done(maybeGreet(draft, message, check.reply), { intent: 'ADD_TO_CART' });
       upsertItem(draft, row.product, row.quantity || 1);
     }
-  } else {
-    const resolved = resolveProductMention(products, message);
+  } else if (!address) {
+    const resolved = resolveProductMention(products, working);
     if (resolved.ambiguous) {
       const names = resolved.matches.map((p) => p.name).join(', ');
-      return done(maybeGreet(draft, message, `Kaunsa wala chahiye: ${names}?`));
+      return done(maybeGreet(draft, message, `Kaunsa wala chahiye: ${names}?`), {
+        intent: 'PRODUCT_SEARCH'
+      });
     }
     if (resolved.matches.length === 1) {
       const product = resolved.matches[0];
-      if (isPriceQuery(message) && !isPurchaseIntent(message) && draft.awaiting === 'PRODUCT' && !draft.items.length) {
+      draft.selectedProductId = product.id;
+      draft.selectedProductName = product.name;
+      if (isPriceQuery(working) && !isPurchaseIntent(working) && !qty) {
+        draft.awaiting = 'QUANTITY';
         return done(
-          maybeGreet(draft, message, `${product.name} Rs. ${unitPrice(product).toLocaleString()} ke hain.`)
+          maybeGreet(draft, message, `${product.name} Rs. ${unitPrice(product).toLocaleString()} ke hain.`),
+          { intent: 'PRODUCT_INQUIRY' }
         );
       }
-      if (isStockQuery(message) && !isPurchaseIntent(message) && draft.awaiting === 'PRODUCT' && !draft.items.length) {
+      if (isStockQuery(working) && !isPurchaseIntent(working) && !qty) {
         const stock = stockOf(product);
+        draft.awaiting = 'QUANTITY';
         return done(
           maybeGreet(
             draft,
             message,
             stock > 0 ? `${product.name} available hain (${stock} stock).` : `${product.name} out of stock hain.`
-          )
+          ),
+          { intent: 'PRODUCT_INQUIRY' }
         );
       }
-      const nextQty = qty || (isQuantityOnly(message) ? qty : null);
+      const nextQty = qty;
       if (nextQty) {
         const check = stockReply(product, nextQty);
-        if (!check.ok) return done(maybeGreet(draft, message, check.reply));
+        if (!check.ok) return done(maybeGreet(draft, message, check.reply), { intent: 'ADD_TO_CART' });
         upsertItem(draft, product, nextQty);
-      } else if (isPurchaseIntent(message) || draft.awaiting === 'PRODUCT' || !draft.selectedProductId) {
-        draft.selectedProductId = product.id;
-        draft.selectedProductName = product.name;
+      } else if (isPurchaseIntent(working) || draft.awaiting === 'PRODUCT') {
         draft.awaiting = 'QUANTITY';
         return done(
           maybeGreet(
             draft,
             message,
             `${product.name} Rs. ${unitPrice(product).toLocaleString()} hain. Kitni quantity chahiye?`
-          )
+          ),
+          { intent: 'ADD_TO_CART' }
         );
       }
-    } else if (draft.awaiting === 'QUANTITY' && qty && draft.selectedProductId) {
-      const product = (products || []).find((p) => p.id === draft.selectedProductId);
-      if (product) {
-        const check = stockReply(product, qty);
-        if (!check.ok) return done(check.reply);
-        upsertItem(draft, product, qty);
-      }
-    } else if (draft.awaiting === 'QUANTITY' && isQuantityOnly(message) && draft.selectedProductId) {
-      const product = (products || []).find((p) => p.id === draft.selectedProductId);
-      if (!qty) return done('Ji, quantity kitni chahiye? Misal ke taur par 2 pieces.');
-      if (product) {
-        const check = stockReply(product, qty);
-        if (!check.ok) return done(check.reply);
-        upsertItem(draft, product, qty);
+    } else {
+      const remembered = rememberedProduct(draft, products);
+      if (qty && remembered) {
+        const check = stockReply(remembered, qty);
+        if (!check.ok) return done(check.reply, { intent: 'UPDATE_QUANTITY' });
+        upsertItem(draft, remembered, qty);
+      } else if (isQuantityOnly(working) && remembered) {
+        return done('Ji, quantity kitni chahiye? Misal ke taur par 2 pieces.', {
+          intent: 'UPDATE_QUANTITY'
+        });
+      } else if ((isPurchaseIntent(working) || qty) && !remembered) {
+        return done(
+          maybeGreet(
+            draft,
+            message,
+            'Yeh product catalog mein nahi mila. Dobara name likhein ya "products dikhao".'
+          ),
+          { intent: 'PRODUCT_SEARCH' }
+        );
       }
     }
+  } else if (qty && rememberedProduct(draft, products) && isUpdateQuantity(working)) {
+    const product = rememberedProduct(draft, products);
+    const check = stockReply(product, qty);
+    if (!check.ok) return done(check.reply, { intent: 'UPDATE_QUANTITY' });
+    upsertItem(draft, product, qty);
   }
 
   draft = totals(draft, fee);
   draft.awaiting = nextMissing(draft);
 
   if (draft.awaiting === 'QUANTITY' && draft.selectedProductName) {
-    return done(`Ji, ${draft.selectedProductName} ke kitne pieces chahiye?`, { skipGroq: false });
-  }
-
-  if (draft.awaiting === 'NAME') {
-    return done('Order book karne se pehle aapka name bata dein.', { skipGroq: false });
+    return done(`Ji, ${draft.selectedProductName} ke kitne pieces chahiye?`, { intent: 'UPDATE_QUANTITY' });
   }
 
   if (draft.awaiting === 'ADDRESS' && draft.items.length) {
     const listed = draft.items.map((i) => `${i.quantity}x ${i.productName}`).join(', ');
-    return done(`Ji, ${listed} note kar liye. Delivery address bata dein.`, { skipGroq: false });
+    return done(maybeGreet(draft, message, `Ji, ${listed} note kar liye. Delivery address bata dein.`), {
+      intent: 'ADD_TO_CART'
+    });
   }
 
   if (draft.awaiting === 'CONFIRMATION' && draft.items.length && draft.deliveryAddress) {
     draft.summaryPresented = true;
     draft.paymentMethod = draft.paymentMethod || 'COD';
-    return done(formatSummary(draft));
+    draft.confirmationRequired = true;
+    return done(formatSummary(draft), { intent: 'CONFIRM_ORDER' });
   }
 
   if (!draft.items.length && !draft.selectedProductId) {
-    if (isPurchaseIntent(message) || qty) {
-      return done(maybeGreet(draft, message, 'Kaunsa product chahiye? Catalog ke liye "products dikhao" likhein.'));
+    if (isPurchaseIntent(working) || qty) {
+      return done(
+        maybeGreet(draft, message, 'Kaunsa product chahiye? Catalog ke liye "products dikhao" likhein.'),
+        { intent: 'PRODUCT_SEARCH' }
+      );
     }
-    return done(null, { skipGroq: false });
+    return done(null, { skipGroq: false, intent: 'UNKNOWN' });
   }
 
-  return done(null, { skipGroq: false });
+  return done(null, { skipGroq: false, intent: draft.currentIntent || 'GENERAL_QUERY' });
 }
 
 function hydrateDraftFromHistory(draft, products, messages) {
@@ -778,13 +928,21 @@ function formatDraftForPrompt(draft) {
   if (!draft) return '(empty)';
   return JSON.stringify(
     {
+      currentIntent: draft.currentIntent,
+      awaiting: draft.awaiting,
       items: draft.items,
+      selectedProductId: draft.selectedProductId,
       selectedProductName: draft.selectedProductName,
       customerName: draft.customerName || null,
       deliveryAddress: draft.deliveryAddress || null,
-      awaiting: draft.awaiting,
+      deliveryCity: draft.deliveryCity || null,
+      paymentMethod: draft.paymentMethod || 'COD',
       greeted: Boolean(draft.greeted),
       summaryPresented: Boolean(draft.summaryPresented),
+      confirmationRequired: Boolean(draft.confirmationRequired || draft.awaiting === 'CONFIRMATION'),
+      orderConfirmed: Boolean(draft.orderConfirmed),
+      orderCreated: Boolean(draft.orderCreated),
+      lastOrderNumber: draft.lastOrderNumber || null,
       totals: { subtotal: draft.subtotal, deliveryFee: draft.deliveryFee, total: draft.total }
     },
     null,
@@ -797,6 +955,7 @@ module.exports = {
   loadDraft,
   saveDraft,
   clearDraft,
+  resetMemoryDrafts,
   applyCustomerTurn,
   hydrateDraftFromHistory,
   formatSummary,
@@ -808,5 +967,6 @@ module.exports = {
   isConfirmText,
   looksLikeCatalogDump,
   resolveCatalogNumber,
-  activeCatalog
+  activeCatalog,
+  extractQuantity
 };

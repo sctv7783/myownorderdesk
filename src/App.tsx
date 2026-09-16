@@ -347,6 +347,7 @@ export default function App() {
         convsRes,
         inboxRes,
         chatsRes,
+        fnInboxRes,
         productsRes,
         customersRes,
         notifsRes,
@@ -360,6 +361,7 @@ export default function App() {
         safeFetch(`/api/conversations?tenantId=${encodeURIComponent(tenantId)}`),
         safeFetch(`/api/inbox?tenantId=${encodeURIComponent(tenantId)}`),
         safeFetch(`/api/chats?tenantId=${encodeURIComponent(tenantId)}`),
+        safeFetch(`/.netlify/functions/inbox?tenantId=${encodeURIComponent(tenantId)}`),
         safeFetch('/api/products'),
         safeFetch('/api/customers'),
         safeFetch('/api/notifications'),
@@ -374,7 +376,8 @@ export default function App() {
       let loadedConvs = mergeConversationLists(
         Array.isArray(convsRes) ? convsRes : (convsRes?.conversations || []),
         Array.isArray(inboxRes) ? inboxRes : (inboxRes?.conversations || []),
-        Array.isArray(chatsRes) ? chatsRes : (chatsRes?.conversations || [])
+        Array.isArray(chatsRes) ? chatsRes : (chatsRes?.conversations || []),
+        Array.isArray(fnInboxRes) ? fnInboxRes : (fnInboxRes?.conversations || [])
       );
       const loadedProducts = Array.isArray(productsRes) ? productsRes : (productsRes?.products || []);
       let loadedCustomers = Array.isArray(customersRes) ? customersRes : (customersRes?.customers || []);
@@ -419,7 +422,7 @@ export default function App() {
       }
 
       if (ordersRes || loadedOrders.length) setOrders(loadedOrders);
-      if (convsRes || inboxRes || chatsRes || loadedConvs.length) setConversations(loadedConvs);
+      if (convsRes || inboxRes || chatsRes || fnInboxRes || loadedConvs.length) setConversations(loadedConvs);
       if (productsRes) setProducts(loadedProducts);
       if (customersRes || loadedCustomers.length) setCustomers(loadedCustomers);
       if (notifsRes) setNotifications(loadedNotifs);
@@ -482,7 +485,8 @@ export default function App() {
         const list = mergeConversationLists(
           await pull(`/api/conversations?tenantId=${tid}`),
           await pull(`/api/inbox?tenantId=${tid}`),
-          await pull(`/api/chats?tenantId=${tid}`)
+          await pull(`/api/chats?tenantId=${tid}`),
+          await pull(`/.netlify/functions/inbox?tenantId=${tid}`)
         );
         if (cancelled || !list.length) return;
         setConversations(prev => {

@@ -20,7 +20,7 @@ function normalizePhone(phone) {
 
 function isHumanHandoff(text) {
   const t = String(text || '').toLowerCase();
-  return /\b(human staff|live agent|real (person|human|insaan)|manager se baat|staff se baat|complaint against)\b/.test(
+  return /\b(human staff|live agent|real (person|human|insaan)|manager se baat|staff se baat|complaint against|mujhe human|human se baat|representative|handoff)\b/.test(
     t
   );
 }
@@ -79,25 +79,25 @@ function parseMeta(raw) {
   return { meta, clean: stripRepeatedGreeting(clean) };
 }
 
-const HUMAN_PROMPT = `You are this store's full WhatsApp shopkeeper. Do every job a human seller would do, A-to-Z. Never say you cannot help with a normal shop task.
+const HUMAN_PROMPT = `You are a WhatsApp ordering assistant.
 
-YOU CAN AND MUST HANDLE:
-- greetings, small talk, store name, hours, city, delivery areas
-- product search, recommend, compare, alternatives, size/color/variant
-- prices, discounts, stock, "kitne ka", "available hai?"
-- send photos when asked. Backend sends the actual WhatsApp images. NEVER write "photo bhej raha hoon", never paste URLs, never mention META.
-- quantity, cart, customer NAME (ask before address), then full delivery address
-- delivery fee, ETA, COD / payment methods from STORE OPS
-- take full address or WhatsApp location pin
-- order summary, confirm, create (backend creates; use ENGINE_HINT numbers)
-- order status / tracking from CUSTOMER ORDERS
-- cancel request, complaint, refund policy from FAQs
-- invoice recap, "dobara bhejo", "pic bhejo", "catalog"
-Think first: is this a continuation of Recent chat? If history exists, SAME conversation — never restart, never greet again, never ask "kaunsa product" if draft/history already has the item. Use ORDER DRAFT + history as memory.
-Voice notes are transcribed into the customer message. Treat that text as what they SAID. Never say you cannot hear, never complain about voice, never force typing unless a number/address is truly missing.
-
-Languages: English, Urdu, Roman Urdu/Hindi, Hindi, Greek, Arabic, Punjabi, mixed slang. Mirror the customer.
-If something is truly outside a shop (illegal, medical diagnosis, etc.) refuse politely and offer a product or staff instead.
+You must use the current conversation state as the primary context.
+Never reset the conversation on every message.
+Never ask for information that is already present in the state.
+Never guess a product, quantity, price, stock, address or order number.
+Never select the first catalog product as a guess.
+A greeting must not override an actionable request.
+If the customer provides a quantity after a product was discussed, apply that quantity to the remembered product.
+If the customer provides an address while a cart exists, save the address and continue the order flow.
+Only interpret "haan", "yes", "okay", "theek hai" or "confirm" as final confirmation when the backend state says that final confirmation is pending.
+Never create an order without: valid cart, valid product IDs, valid quantities, verified stock, verified current prices, delivery address, and explicit confirmation.
+Keep responses concise and natural for WhatsApp.
+Use the customer's language style: Urdu, Roman Urdu, English, or mixed.
+Do not greet repeatedly.
+Do not show the complete catalog unless the customer asks for it.
+Do not restart the conversation after every message.
+The database and ENGINE_HINT / ORDER DRAFT are the source of truth.
+Backend sends WhatsApp images. Never write "photo bhej raha hoon", never paste URLs, never mention META.
 
 <<<META
 {"send_images":[],"note":""}
@@ -234,11 +234,22 @@ async function generateAgentReply(incomingText, options = {}) {
     .join('\n');
   const continuing = Boolean(historyText || draft?.items?.length || draft?.selectedProductId);
   const photoAsk = wantsPhotos(text);
+  const photoImages = photoAsk ? pickProductPhotos(products, draft, text, []) : [];
+
+  if (engine.reply && (engine.skipGroq || engine.next === 'done' || photoAsk)) {
+    return {
+      reply: stripRepeatedGreeting(engine.reply),
+      skipped: false,
+      settings,
+      order: engine.order || null,
+      model: GROQ_MODEL,
+      images: photoAsk ? photoImages : []
+    };
+  }
 
   if (photoAsk) {
-    const images = pickProductPhotos(products, draft, text, []);
-    const name = draft?.selectedProductName || images[0]?.caption?.split(' — ')[0] || '';
-    const reply = images.length
+    const name = draft?.selectedProductName || photoImages[0]?.caption?.split(' — ')[0] || '';
+    const reply = photoImages.length
       ? `${name || 'Product'} ki photos.`
       : `${name || 'Product'} ki photo catalog mein HTTPS image nahi hai. Dashboard pe product photos add karein.`;
     return {
@@ -247,7 +258,7 @@ async function generateAgentReply(incomingText, options = {}) {
       settings,
       order: engine.order || null,
       model: GROQ_MODEL,
-      images
+      images: photoImages
     };
   }
 

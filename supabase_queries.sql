@@ -265,7 +265,7 @@ CREATE TABLE IF NOT EXISTS order_drafts (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_order_drafts_business ON order_drafts(business_id);
-CREATE INDEX IF NOT EXISTS idx_order_drafts_phone ON order_drafts(customer_phone);
+COMMENT ON TABLE order_drafts IS 'Per-customer WhatsApp order conversation state (JSON in state: cart, awaiting, confirmation flags).';
 
 CREATE TABLE IF NOT EXISTS whatsapp_messages (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

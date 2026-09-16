@@ -10,21 +10,29 @@ function emptyState() {
   return { conversations: [], messagesByConv: {} };
 }
 
-async function loadInbox(tenantId) {
+async function loadJson(key) {
   const store = await getStore();
-  if (!store) return emptyState();
+  if (!store || !key) return emptyState();
   try {
-    return (await store.get(`tenant:${tenantId}`, { type: 'json' })) || emptyState();
+    return (await store.get(key, { type: 'json' })) || emptyState();
   } catch {
     return emptyState();
   }
 }
 
-async function saveInbox(tenantId, state) {
+async function saveJson(key, state) {
   const store = await getStore();
-  if (!store) return false;
-  await store.setJSON(`tenant:${tenantId}`, state);
+  if (!store || !key) return false;
+  await store.setJSON(key, state);
   return true;
+}
+
+async function loadInbox(tenantId) {
+  return loadJson(`tenant:${tenantId}`);
+}
+
+async function saveInbox(tenantId, state) {
+  return saveJson(`tenant:${tenantId}`, state);
 }
 
 function wabaKey(phoneNumberId) {
@@ -33,21 +41,38 @@ function wabaKey(phoneNumberId) {
 
 async function loadWabaInbox(phoneNumberId) {
   if (!phoneNumberId) return emptyState();
-  const store = await getStore();
-  if (!store) return emptyState();
-  try {
-    return (await store.get(wabaKey(phoneNumberId), { type: 'json' })) || emptyState();
-  } catch {
-    return emptyState();
-  }
+  return loadJson(wabaKey(phoneNumberId));
 }
 
 async function saveWabaInbox(phoneNumberId, state) {
   if (!phoneNumberId) return false;
+  return saveJson(wabaKey(phoneNumberId), state);
+}
+
+async function loadAllInboxStates() {
   const store = await getStore();
-  if (!store) return false;
-  await store.setJSON(wabaKey(phoneNumberId), state);
-  return true;
+  const states = [await loadInbox('__all__'), await loadInbox('unmapped')];
+  if (!store || typeof store.list !== 'function') return states;
+  try {
+    let listed = await store.list();
+    const keys = [];
+    const pushKeys = (result) => {
+      for (const blob of result?.blobs || []) {
+        if (blob?.key) keys.push(blob.key);
+      }
+    };
+    pushKeys(listed);
+    while (listed?.next) {
+      listed = await listed.next();
+      pushKeys(listed);
+    }
+    const unique = [...new Set(keys.filter((key) => /^(tenant:|waba:)/.test(key)))];
+    const extra = await Promise.all(unique.slice(0, 40).map((key) => loadJson(key)));
+    states.push(...extra);
+  } catch (err) {
+    console.warn('[Inbox] blob list failed', err?.message || err);
+  }
+  return states;
 }
 
 function upsertConversation(state, data) {
@@ -102,8 +127,13 @@ async function appendMessage(tenantId, data) {
   };
   state.messagesByConv[conv.id].push(msg);
   await saveInbox(tenantId, state);
+  const all = await loadInbox('__all__');
+  upsertConversation(all, { ...data, tenantId, conversationId: conv.id });
+  if (!all.messagesByConv[conv.id]) all.messagesByConv[conv.id] = [];
+  all.messagesByConv[conv.id].push(msg);
+  await saveInbox('__all__', all);
 
-  const phoneNumberId = data.phoneNumberId;
+  const phoneNumberId = data.phoneNumberId || process.env.META_PHONE_NUMBER_ID;
   if (phoneNumberId) {
     const waba = await loadWabaInbox(phoneNumberId);
     const wabaConv = upsertConversation(waba, { ...data, tenantId, conversationId: conv.id });
@@ -144,12 +174,12 @@ function mergeConvStates(states) {
 
 async function listConversations(tenantId, phoneNumberId) {
   const phones = [...new Set([phoneNumberId, process.env.META_PHONE_NUMBER_ID].filter(Boolean))];
-  const tenants = [...new Set([tenantId, 'unmapped'].filter(Boolean))];
-  const states = await Promise.all([
-    ...tenants.map((id) => loadInbox(id)),
-    ...phones.map((id) => loadWabaInbox(id))
+  const tenants = [...new Set([tenantId, 'unmapped', '__all__'].filter(Boolean))];
+  const [named, listed] = await Promise.all([
+    Promise.all([...tenants.map((id) => loadInbox(id)), ...phones.map((id) => loadWabaInbox(id))]),
+    loadAllInboxStates()
   ]);
-  return mergeConvStates(states);
+  return mergeConvStates([...named, ...listed]);
 }
 
 function collectMessages(state, conversationId) {
@@ -168,11 +198,13 @@ function collectMessages(state, conversationId) {
 
 async function listMessages(tenantId, conversationId, phoneNumberId) {
   const phones = [...new Set([phoneNumberId, process.env.META_PHONE_NUMBER_ID].filter(Boolean))];
-  const tenants = [...new Set([tenantId, 'unmapped'].filter(Boolean))];
-  const states = await Promise.all([
+  const tenants = [...new Set([tenantId, 'unmapped', '__all__'].filter(Boolean))];
+  const named = await Promise.all([
     ...tenants.map((id) => loadInbox(id)),
     ...phones.map((id) => loadWabaInbox(id))
   ]);
+  const listed = await loadAllInboxStates();
+  const states = [...named, ...listed];
   const seen = new Set();
   const merged = [];
   for (const state of states) {
@@ -188,13 +220,17 @@ async function listMessages(tenantId, conversationId, phoneNumberId) {
 }
 
 async function setConversationStatus(tenantId, conversationId, status) {
-  const state = await loadInbox(tenantId);
-  const conv = state.conversations.find((c) => c.id === conversationId);
-  if (!conv) return null;
-  conv.status = status;
-  conv.updatedAt = new Date().toISOString();
-  await saveInbox(tenantId, state);
-  return conv;
+  const targets = [...new Set([tenantId, 'unmapped', '__all__'].filter(Boolean))];
+  for (const id of targets) {
+    const state = await loadInbox(id);
+    const conv = state.conversations.find((c) => c.id === conversationId);
+    if (!conv) continue;
+    conv.status = status;
+    conv.updatedAt = new Date().toISOString();
+    await saveInbox(id, state);
+    return conv;
+  }
+  return null;
 }
 
 module.exports = {

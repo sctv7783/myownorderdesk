@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx src/test/run-tests.ts"
+    "typecheck": "tsc --noEmit",
+    "test": "node netlify/lib/order-engine.test.cjs",
+    "test:legacy": "tsx src/test/run-tests.ts"
   },
   "dependencies": {
     "@netlify/blobs": "^10.0.10",

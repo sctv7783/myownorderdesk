@@ -594,9 +594,12 @@ function handleDeterministicFallback(
     }
   }
 
-  // Fallback to first product if user explicitly asks to order
+  // Never guess the first catalog product. If nothing matched, ask for the product name.
   if (!targetProduct && (isConfirming || lower.includes('order'))) {
-    targetProduct = products[0];
+    return {
+      responseText: 'Kaunsa product confirm karun? Name ya catalog number likhein.',
+      isHandoff: false
+    };
   }
 
   // Case A: Customer is confirming or asking to order, but NO address is recorded yet

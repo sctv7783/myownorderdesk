@@ -80,12 +80,13 @@ async function insertVariants(table, variants) {
 }
 
 async function conversationsFromMessages(tenantId) {
-  const { ok, rows } = await sbSelect('whatsapp_messages', {
+  const query = {
     select: '*',
-    business_id: `eq.${tenantId}`,
     order: 'created_at.desc',
     limit: '200'
-  });
+  };
+  if (tenantId && isUuid(tenantId)) query.business_id = `eq.${tenantId}`;
+  const { ok, rows } = await sbSelect('whatsapp_messages', query);
   if (!ok || !rows.length) return [];
   const byConv = new Map();
   for (const row of rows) {
@@ -145,16 +146,22 @@ async function listConversations(tenantId, phoneNumberId) {
     }
   }
   let remote = remoteChunks.flat();
+  if (!remote.length) {
+    const any = await sbSelect('whatsapp_conversations', { select: '*', limit: '200' });
+    if (any.ok && any.rows.length) {
+      remote = any.rows.map((row) => mapConversation(row, tenantId));
+    }
+  }
   const fromMessages =
-    !remote.length && !(local || []).length && isUuid(tenantId)
-      ? await conversationsFromMessages(tenantId)
+    !remote.length && !(local || []).length
+      ? await conversationsFromMessages(isUuid(tenantId) ? tenantId : '')
       : [];
   return mergeConversations(remote, mergeConversations(fromMessages, local));
 }
 
 async function listMessages(tenantId, conversationId, phoneNumberId) {
   const local = await blob.listMessages(tenantId, conversationId, phoneNumberId);
-  if (!getSupabaseConfig() || !isUuid(tenantId)) return local;
+  if (!getSupabaseConfig()) return local;
   if (isUuid(conversationId)) {
     const { ok, rows } = await sbSelect('whatsapp_messages', {
       select: '*',
